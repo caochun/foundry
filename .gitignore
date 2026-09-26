@@ -1,0 +1,73 @@
+# ─── OS ────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ─── IDEs ──────────────────────────────────────────────────────────────
+.idea/
+*.iml
+*.iws
+.vscode/
+.project
+.classpath
+.settings/
+
+# ─── Java / Maven / Gradle ─────────────────────────────────────────────
+*.class
+*.log
+*.jar
+*.war
+*.ear
+target/
+build/
+out/
+.gradle/
+
+# Keep Maven/Gradle wrapper files under version control.
+!.mvn/wrapper/
+!gradle/wrapper/
+
+# ─── Test and coverage output ─────────────────────────────────────────
+coverage/
+html-report/
+test-results/
+surefire-reports/
+failsafe-reports/
+
+# ─── Node tooling used by reference submodules and auxiliary tools ─────
+node_modules/
+dist/
+.npm/
+.pnpm-store/
+*.tsbuildinfo
+
+# ─── Local configuration and secrets ──────────────────────────────────
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+*.pem
+*.key
+*.p12
+*.jks
+
+# ─── Runtime and temporary files ──────────────────────────────────────
+logs/
+tmp/
+temp/
+*.tmp
+*.swp
+*.swo
+
+# ─── Generated local artifacts ─────────────────────────────────────────
+.generated/
+.runtime/
+docker-data/
+
+# ─── Office documents ──────────────────────────────────────────────────
+*.docx
+*.doc
+*.xlsx
+*.xls
