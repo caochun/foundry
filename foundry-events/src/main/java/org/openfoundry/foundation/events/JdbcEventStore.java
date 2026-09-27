@@ -23,11 +23,13 @@ public final class JdbcEventStore implements AuditStore, OutboxStore {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
     private final DataSource dataSource;
     private final DatabaseDialect dialect;
+    private final JdbcOutboxDelivery delivery;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public JdbcEventStore(DataSource dataSource, DatabaseDialect dialect) {
         this.dataSource = dataSource;
         this.dialect = dialect;
+        this.delivery = new JdbcOutboxDelivery(dataSource, dialect);
     }
 
     public void initialize() {
@@ -49,14 +51,17 @@ public final class JdbcEventStore implements AuditStore, OutboxStore {
                 CREATE INDEX IF NOT EXISTS idx_of_outbox_pending ON of_outbox_events (tenant_id, published_at, occurred_at);
                 """.formatted(timestamp, text, timestamp, text, timestamp);
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            connection.setAutoCommit(true);
             for (String statementSql : ddl.split(";\\s*")) if (!statementSql.isBlank()) statement.execute(statementSql);
         } catch (SQLException exception) { throw failure("initialize event tables", exception); }
+        delivery.initialize();
     }
 
     @Override
     public void append(AuditRecord record) {
         String sql = "INSERT INTO of_audit_records (id, tenant_id, timestamp_value, actor_id, operation_type, object_type, object_id, action_type, transaction_id, result, detail_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            connection.setAutoCommit(true);
             statement.setString(1, record.id()); statement.setString(2, record.tenantId()); statement.setTimestamp(3, timestamp(record.timestamp()));
             statement.setString(4, record.actorId()); statement.setString(5, record.operationType()); statement.setString(6, record.objectType()); statement.setString(7, record.objectId());
             statement.setString(8, record.actionType()); statement.setString(9, record.transactionId()); statement.setString(10, record.result()); statement.setString(11, json(record.detail()));
@@ -81,6 +86,7 @@ public final class JdbcEventStore implements AuditStore, OutboxStore {
     public void append(OutboxEvent event) {
         String sql = "INSERT INTO of_outbox_events (id, tenant_id, type, subject, occurred_at, transaction_id, data_json, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
         try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            connection.setAutoCommit(true);
             statement.setString(1, event.id()); statement.setString(2, event.tenantId()); statement.setString(3, event.type()); statement.setString(4, event.subject());
             statement.setTimestamp(5, timestamp(event.occurredAt())); statement.setString(6, event.transactionId()); statement.setString(7, json(event.data())); setNullable(statement, 8, event.publishedAt()); statement.executeUpdate();
         } catch (SQLException exception) { throw failure("append outbox", exception); }
@@ -88,6 +94,7 @@ public final class JdbcEventStore implements AuditStore, OutboxStore {
 
     @Override
     public List<OutboxEvent> pending(String tenantId, int limit) {
+        DeliveryTimes.selection(tenantId, limit);
         String sql = "SELECT * FROM of_outbox_events WHERE tenant_id = ? AND published_at IS NULL ORDER BY occurred_at LIMIT ?";
         try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, tenantId); statement.setInt(2, limit);
@@ -98,11 +105,29 @@ public final class JdbcEventStore implements AuditStore, OutboxStore {
     }
 
     @Override
+    @Deprecated
     public void markPublished(String eventId, Instant publishedAt) {
-        try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement("UPDATE of_outbox_events SET published_at = ? WHERE id = ?")) {
-            statement.setTimestamp(1, timestamp(publishedAt)); statement.setString(2, eventId);
-            if (statement.executeUpdate() != 1) throw new IllegalArgumentException("outbox event not found: " + eventId);
-        } catch (SQLException exception) { throw failure("mark outbox published", exception); }
+        delivery.legacyComplete(eventId, publishedAt);
+    }
+
+    @Override
+    public List<OutboxClaim> claim(String tenantId, int limit, Instant now, java.time.Duration lease) {
+        return delivery.claim(tenantId, limit, now, lease);
+    }
+
+    @Override
+    public boolean renew(OutboxClaim claim, Instant now, java.time.Duration lease) {
+        return delivery.renew(claim, now, lease);
+    }
+
+    @Override
+    public boolean complete(OutboxClaim claim, Instant now) {
+        return delivery.complete(claim, now);
+    }
+
+    @Override
+    public boolean fail(OutboxClaim claim, Instant now, Instant retryAt) {
+        return delivery.fail(claim, now, retryAt);
     }
 
     private AuditRecord readAudit(ResultSet result) throws SQLException {

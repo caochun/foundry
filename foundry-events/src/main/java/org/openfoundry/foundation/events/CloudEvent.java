@@ -8,6 +8,8 @@ public record CloudEvent(String specVersion, String id, String source, String ty
                          String transactionId, Map<String, Object> data) {
     public CloudEvent {
         if (!"1.0".equals(specVersion)) throw new IllegalArgumentException("only CloudEvents 1.0 are supported");
-        data = Map.copyOf(data);
+        if (id == null || id.isBlank() || source == null || source.isBlank() || type == null || type.isBlank()
+                || tenantId == null || tenantId.isBlank()) throw new IllegalArgumentException("CloudEvent identity and tenant are required");
+        data = org.openfoundry.foundation.spi.schema.PropertyValues.immutableMap(data);
     }
 }

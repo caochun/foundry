@@ -13,6 +13,6 @@ public record OutboxEntry(String id, String tenantId, String type, String subjec
         if (tenantId == null || tenantId.isBlank()) throw new IllegalArgumentException("tenantId must not be blank");
         if (type == null || type.isBlank()) throw new IllegalArgumentException("type must not be blank");
         Objects.requireNonNull(occurredAt, "occurredAt must not be null");
-        data = Map.copyOf(data);
+        data = org.openfoundry.foundation.spi.schema.PropertyValues.immutableMap(data);
     }
 }

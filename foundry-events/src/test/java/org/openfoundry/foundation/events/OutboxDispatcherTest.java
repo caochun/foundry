@@ -14,13 +14,16 @@ class OutboxDispatcherTest {
         InMemoryOutboxStore store = new InMemoryOutboxStore();
         store.append(new OutboxEvent("event-1", "tenant", "test.event", "subject",
                 Instant.now(), "tx-1", Map.of(), null));
+        var clock = new DeliveryTestClock();
         AtomicInteger attempts = new AtomicInteger();
         OutboxDispatcher dispatcher = new OutboxDispatcher(store, event -> {
             if (attempts.getAndIncrement() == 0) throw new IllegalStateException("temporary failure");
-        }, "test");
+        }, "test", clock, java.time.Duration.ofMinutes(1), java.time.Duration.ofSeconds(1));
 
         assertEquals(new OutboxDispatcher.DispatchResult(0, 1), dispatcher.dispatch("tenant", 10));
         assertEquals(1, store.pending("tenant", 10).size());
+        assertEquals(new OutboxDispatcher.DispatchResult(0, 0), dispatcher.dispatch("tenant", 10));
+        clock.advance(1);
         assertEquals(new OutboxDispatcher.DispatchResult(1, 0), dispatcher.dispatch("tenant", 10));
         assertEquals(0, store.pending("tenant", 10).size());
     }
