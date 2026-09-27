@@ -74,6 +74,11 @@ public final class SchemaCompiler {
             Set<String> parameterNames = new HashSet<>();
             for (ActionParameter parameter : action.parameters()) {
                 if (Set.of("actor", "params", "now").contains(parameter.name())) issues.add("reserved Action parameter: " + parameter.name());
+                String parameterType = parameter.baseType();
+                if (!org.openfoundry.foundation.spi.schema.PropertyValues.SCALARS.contains(parameterType)
+                        && !schema.enums().containsKey(parameterType) && !objectNames.contains(parameterType)) {
+                    issues.add("unsupported Action parameter type: " + action.name() + "." + parameter.name() + ": " + parameter.type());
+                }
                 if (!parameterNames.add(parameter.name())) {
                     issues.add("duplicate parameter " + parameter.name() + " in action " + action.name());
                 }

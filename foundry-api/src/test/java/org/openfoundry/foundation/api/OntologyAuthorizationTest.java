@@ -170,7 +170,7 @@ class OntologyAuthorizationTest {
         var action = new ActionManifest("Create", 1, false, List.of(), List.of(new ActionManifest.CreateObject("Notice", null, Map.of("name", "params.name"))));
         f.grants.add("ActionType/Create#can_create");
         var initial = f.app(action).execute(action, CONTEXT, PRINCIPAL, Map.of("name", "New"), "legacy");
-        for (boolean corrupt : List.of(false, true)) {
+        for (String proof : List.of("legacy", "invalid", "mismatched")) {
             StorageProvider wrapped = (StorageProvider) java.lang.reflect.Proxy.newProxyInstance(StorageProvider.class.getClassLoader(), new Class<?>[]{StorageProvider.class}, (proxy, method, args) -> {
                 try {
                     Object value = method.invoke(f.storage, args);
@@ -180,7 +180,8 @@ class OntologyAuthorizationTest {
                                 Object result = operation.invoke(tx, parameters);
                                 if (result instanceof CommandReceipt receipt) {
                                     var data = new java.util.LinkedHashMap<>(receipt.result());
-                                    if (corrupt) data.put("access", "invalid");
+                                    if (proof.equals("invalid")) data.put("access", "invalid");
+                                    else if (proof.equals("mismatched")) data.put("affected", List.of(Map.of("type", "Notice", "id", "unrelated")));
                                     else data.remove("access");
                                     return new CommandReceipt(receipt.key(), receipt.actorId(), receipt.action(), receipt.requestHash(), data);
                                 }
@@ -193,12 +194,16 @@ class OntologyAuthorizationTest {
             });
             var app = new ApplicationService(wrapped, new AuthorizationService(f::check), new ActionExecutor(), SCHEMA,
                     Map.of("Create", action), Map.of(), AuthorizationMode.ONTOLOGY_TARGETS);
-            if (corrupt) {
+            if (!proof.equals("legacy")) {
                 assertThrows(IllegalStateException.class, () -> app.execute(action, CONTEXT, PRINCIPAL, Map.of("name", "New"), "legacy"));
             } else {
                 assertThrows(SecurityException.class, () -> app.execute(action, CONTEXT, PRINCIPAL, Map.of("name", "New"), "legacy"));
                 f.grants.add("Notice/" + initial.affected().getFirst().id() + "#editor");
-                assertEquals(initial, app.execute(action, CONTEXT, PRINCIPAL, Map.of("name", "New"), "legacy"));
+                var replayed = app.execute(action, CONTEXT, PRINCIPAL, Map.of("name", "New"), "legacy");
+                assertEquals(initial.actionId(), replayed.actionId());
+                assertEquals(initial.affected(), replayed.affected());
+                assertTrue(replayed.success());
+                assertEquals(ActionResult.ChangeType.UNKNOWN, replayed.changes().getFirst().changeType());
             }
         }
         assertEquals(1, f.storage.queryObjects(CONTEXT, "Notice", QueryOptions.defaults()).size());

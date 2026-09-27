@@ -25,6 +25,7 @@ public final class ActionExecutor {
     private final SideEffectHandler sideEffects;
     private final java.time.Clock clock;
     private final java.time.Duration lease;
+    private final org.openfoundry.foundation.spi.schema.OntologySchema parameterSchema;
 
     public ActionExecutor() {
         this(new CelExpressionEvaluator(), null);
@@ -39,11 +40,13 @@ public final class ActionExecutor {
     }
 
     public ActionExecutor(ExpressionEvaluator evaluator, IdempotencyStore idempotencyStore, ActionAuthorizer authorizer) {
-        this(evaluator, idempotencyStore, authorizer, null, java.time.Clock.systemUTC(), java.time.Duration.ofMinutes(1));
+        this(evaluator, idempotencyStore, authorizer, null, java.time.Clock.systemUTC(), java.time.Duration.ofMinutes(1), null);
     }
 
     private ActionExecutor(ExpressionEvaluator evaluator, IdempotencyStore idempotencyStore, ActionAuthorizer authorizer,
-                           SideEffectHandler sideEffects, java.time.Clock clock, java.time.Duration lease) {
+                           SideEffectHandler sideEffects, java.time.Clock clock, java.time.Duration lease,
+                           org.openfoundry.foundation.spi.schema.OntologySchema parameterSchema) {
+        this.parameterSchema = parameterSchema;
         this.sideEffects = sideEffects;
         this.clock = java.util.Objects.requireNonNull(clock);
         this.lease = java.util.Objects.requireNonNull(lease);
@@ -55,7 +58,12 @@ public final class ActionExecutor {
 
     /** Only trusted application wiring may supply policies; no HTTP request can provide one. */
     public ActionExecutor withAuthorization(ActionAuthorizer policy) {
-        return new ActionExecutor(evaluator, idempotencyStore, policy, sideEffects, clock, lease);
+        return new ActionExecutor(evaluator, idempotencyStore, policy, sideEffects, clock, lease, parameterSchema);
+    }
+
+    public ActionExecutor withParameterSchema(org.openfoundry.foundation.spi.schema.OntologySchema schema) {
+        org.openfoundry.foundation.spi.schema.PropertyValues.requireSchema(schema);
+        return new ActionExecutor(evaluator, idempotencyStore, authorizer, sideEffects, clock, lease, schema);
     }
 
     public ActionExecutor withSideEffects(SideEffectHandler handler) {
@@ -63,7 +71,7 @@ public final class ActionExecutor {
     }
 
     public ActionExecutor withSideEffects(SideEffectHandler handler, java.time.Clock clock, java.time.Duration lease) {
-        return new ActionExecutor(evaluator, idempotencyStore, authorizer, java.util.Objects.requireNonNull(handler), clock, lease);
+        return new ActionExecutor(evaluator, idempotencyStore, authorizer, java.util.Objects.requireNonNull(handler), clock, lease, parameterSchema);
     }
 
     public ActionResult resume(ActionManifest manifest, ActionTypeDefinition definition, String actionId,
@@ -105,7 +113,7 @@ public final class ActionExecutor {
                 || context.actorId() == null || !context.actorId().equals(actor.id())) {
             throw new SecurityException("Action requires a declared permission and matching authenticated actor");
         }
-        if (!new ActionParameterValidator().validate(definition, parameters).isEmpty()) {
+        if (!new ActionParameterValidator(parameterSchema).validate(definition, parameters).isEmpty()) {
             throw new IllegalArgumentException("Action parameters do not match the registered schema");
         }
         if (!storage.capabilities().transactionalCommandReceipts() && manifest.effects().stream()
@@ -222,7 +230,9 @@ public final class ActionExecutor {
             }
             affected.add(new EntityKey(type, id));
         }
-        return new ActionResult(true, actionId, affected);
+        var changes = stored.containsKey("access") ? ActionResult.changes(affected, ActionEffectAccess.decode(stored.get("access")))
+                : affected.stream().map(key -> new ActionResult.Change(key.type(), key.id(), ActionResult.ChangeType.UNKNOWN)).toList();
+        return new ActionResult(true, actionId, affected, "COMPLETED", List.of(), changes);
     }
 
     private ActionResult executeEffects(ActionManifest manifest, ActionTypeDefinition definition, RequestContext context, ActionActor actor,
@@ -242,8 +252,8 @@ public final class ActionExecutor {
         var expressions = new ActionValues(parameters, actor, now);
         for (ActionManifest.Precondition precondition : manifest.preconditions()) {
             if (!evaluator.evaluate(precondition.expression(), parameters, actor, now)) {
-                ActionResult result = new ActionResult(false, actionId, List.of());
-                return result;
+                return new ActionResult(false, actionId, List.of(), "REJECTED", List.of(
+                        new ActionResult.Failure("PRECONDITION_FAILED", "", precondition.error(), null)));
             }
         }
 
@@ -309,7 +319,7 @@ public final class ActionExecutor {
         transaction.enqueueOutbox(new OutboxEntry(
                 "event_" + actionId, context.tenantId(), continued ? "openfoundry.action.effects_committed" : "openfoundry.action.completed",
                 manifest.action() + "/" + actionId, now, transaction.transactionId(), detail));
-        return new ActionResult(true, actionId, affected);
+        return new ActionResult(true, actionId, affected, "COMPLETED", List.of(), ActionResult.changes(access));
     }
 
     public ActionBatchResult executeBatch(List<ActionInvocation> invocations,

@@ -21,4 +21,4 @@
 
 新增必填、只读审计字段可能使缺少旧值的记录无法通过下一次写入；本实现不会推测真实创建人或创建时刻，也不会自动回填。默认值改变及接口/约束变化采用保守BREAKING分类，需迁移评审。
 
-本ADR完成时仅支持单Schema接口组合；后续ADR-0014已接通Pack组合，ADR-0015已保留并执行LAZY/countLinks计算字段。关系导航已在后续[ADR-0009](0009-declared-relationship-navigation.md)中接通，关系写入声明约束仍未完整支持。Action GraphQL输入仍是JSON字符串，未完成类型化参数。一般只读值生成、时间/复杂值在CEL中的完整类型语义也未承诺上游等价。
+本ADR完成时仅支持单Schema接口组合；后续ADR-0014已接通Pack组合，ADR-0015已保留并执行LAZY/countLinks计算字段。关系导航已在后续[ADR-0009](0009-declared-relationship-navigation.md)中接通，关系写入声明约束仍未完整支持。Action GraphQL输入后续已由ADR-0016接通类型化参数，并保留显式旧JSON模式。一般只读值生成、时间/复杂值在CEL中的完整类型语义也未承诺上游等价。

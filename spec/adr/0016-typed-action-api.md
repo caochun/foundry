@@ -1,0 +1,33 @@
+# ADR-0016：Schema感知参数与类型化Action API
+
+状态：Accepted。日期：2026-09-28。
+
+## 参数
+
+ActionParameter验证名称和递归列表类型语法，外层必填由required表示。SchemaCompiler拒绝未知或未支持的参数类型。ActionParameterValidator可绑定可信OntologySchema，支持枚举、平台标量和嵌套列表非空元素；与属性校验共享类型规则，不再把枚举、Duration、URI、GeoPoint误当对象引用。
+
+ApplicationService绑定参数Schema，对象参数仍只接受ID并在当前租户解析；执行器复制授权/副作用配置时保留参数Schema。直接Java执行器使用withParameterSchema开启枚举校验，未提供声明时不会把未知枚举当任意字符串接受。可选参数允许显式null，批量调用不因Map.copyOf拒绝合法null。
+
+参数输入保持JSON值边界；校验不任意转换已有请求表示或改写旧指纹。GraphQL标量按其线格式规范化，幂等键仍绑定解析后的具体请求表示，不承诺不同表示的数值/时间字符串自动合并成同一个请求。
+
+## GraphQL契约
+
+GraphqlApiRuntime.create默认生成上游风格的ActionNameInput及ActionNameResult。对象参数映射为ID，枚举保留名称，标量和嵌套列表/非空规则保留。输入未知字段、类型不符和非法枚举在进入业务执行前拒绝。JSON字面量支持嵌套变量。
+
+结果包含success、actionId、status、errors及affectedObjects；后者使用typeName/id/changeType。正常变更类别从服务端真实effect记录取得，持续任务使用持久journal，旧回执缺少依据时使用扩展值UNKNOWN，不猜测历史。记录的affected与access/journal不一致时拒绝读取结果。
+
+前置条件拒绝提供PRECONDITION_FAILED及manifest中的静态说明。副作用/补偿状态保留现有语义；affectedObjects表示原业务效果，不表示外部通知已撤回，必须结合status理解。
+
+无参数Action不生成无效的空Input类型，直接提供无input参数的mutation。生成Input/Result/共享类型命名冲突及重复mutation名称明确拒绝。
+
+## 兼容
+
+旧字符串输入可显式使用GraphqlApiRuntime.createLegacy或ActionMode.LEGACY_JSON，SDL生成器也提供对应模式。旧模式保留原结果信封字段，不额外序列化新changes成员。默认GraphQL mutation签名的切换需要调用方更新查询；不会把旧JSONString请求悄悄解释为类型化输入。
+
+ActionResult与Failure保留原构造器，REST结果新增结构化变更信息。命令回执仍沿用现有格式1/2及请求指纹规则，新变更信息由已有access/journal派生，没有重写旧回执或重新执行动作。
+
+## 验证范围
+
+memory/H2覆盖枚举、自定义标量、嵌套列表、JSON变量/字面量、显式null、拒绝无写入、类型化结果、幂等、无参数动作及旧JSON模式。单独验证未知类型、生成名冲突、直接执行器Schema复制和坏回执目标不一致。
+
+完整查询过滤/排序/聚合、订阅、批量GraphQL入口、结构值和接口型参数，以及与真实身份服务的端到端接线仍未完成。类型化输入不是把这些缺口计作完成的依据。

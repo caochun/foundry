@@ -9,7 +9,7 @@ public record ActionInvocation(ActionManifest manifest, ActionActor actor,
     }
 
     public ActionInvocation {
-        parameters = Map.copyOf(parameters);
+        parameters = java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(parameters));
         if (idempotencyKey == null || idempotencyKey.isBlank()) throw new IllegalArgumentException("idempotencyKey must not be blank");
     }
 }

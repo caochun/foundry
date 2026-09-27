@@ -1,72 +1,63 @@
 package org.openfoundry.foundation.actions;
 
 import org.openfoundry.foundation.spi.ObjectRecord;
-import org.openfoundry.foundation.spi.schema.ActionParameter;
-import org.openfoundry.foundation.spi.schema.ActionTypeDefinition;
+import org.openfoundry.foundation.spi.schema.*;
 
-import java.time.Instant;
-import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-/** Validates resolved parameters. Object IDs must be resolved by the authenticated application boundary first. */
+/** Validates resolved values against trusted schema metadata; object snapshots are supplied only by the application boundary. */
 public final class ActionParameterValidator {
+    private static final OntologySchema SCALARS = new OntologySchema("parameters", "1", List.of(), List.of(), List.of());
+    private final OntologySchema schema;
+    private final Set<String> objects;
+
+    public ActionParameterValidator() { this(null); }
+
+    public ActionParameterValidator(OntologySchema schema) {
+        this.schema = schema == null ? SCALARS : schema;
+        objects = schema == null ? null : schema.objectTypes().stream().map(ObjectTypeDefinition::name).collect(Collectors.toSet());
+    }
+
     public List<String> validate(ActionTypeDefinition definition, Map<String, Object> parameters) {
-        List<String> errors = new ArrayList<>();
+        var errors = new ArrayList<String>();
         Set<String> known = definition.parameters().stream().map(ActionParameter::name).collect(Collectors.toSet());
-        for (String name : parameters.keySet()) {
-            if (!known.contains(name)) errors.add("unknown Action parameter: " + name);
-        }
-        for (ActionParameter parameter : definition.parameters()) {
+        for (String name : parameters.keySet()) if (!known.contains(name)) errors.add("unknown Action parameter: " + name);
+        for (var parameter : definition.parameters()) {
             if (Set.of("actor", "params", "now").contains(parameter.name())) errors.add("reserved Action parameter: " + parameter.name());
+            String base = parameter.baseType();
+            if (objects != null && !PropertyValues.SCALARS.contains(base) && !schema.enums().containsKey(base) && !objects.contains(base)) {
+                errors.add("unknown Action parameter type: " + parameter.name());
+                continue;
+            }
             Object value = parameters.get(parameter.name());
             if (value == null) {
                 if (parameter.required()) errors.add("missing required Action parameter: " + parameter.name());
-            } else if (!matches(parameter.type(), value)) {
+            } else if (!matches(parameter.type(), value, parameter.name())) {
                 errors.add("invalid Action parameter type: " + parameter.name());
             }
         }
         return List.copyOf(errors);
     }
 
-    private boolean matches(String type, Object value) {
+    private boolean matches(String type, Object value, String name) {
+        if (type.endsWith("!")) return value != null && matches(type.substring(0, type.length() - 1), value, name);
+        if (value == null) return true;
         if (type.startsWith("[") && type.endsWith("]")) {
             String element = type.substring(1, type.length() - 1);
-            boolean required = element.endsWith("!");
-            String base = required ? element.substring(0, element.length() - 1) : element;
-            return value instanceof List<?> list && list.stream().allMatch(item -> item == null ? !required : matches(base, item));
+            return value instanceof List<?> list && list.stream().allMatch(item -> matches(element, item, name));
         }
-        return switch (type) {
-            case "ID", "String" -> value instanceof String;
-            case "Int" -> (value instanceof Integer || value instanceof Long)
-                    && ((Number) value).longValue() >= Integer.MIN_VALUE && ((Number) value).longValue() <= Integer.MAX_VALUE;
-            case "Float" -> value instanceof Number number && Double.isFinite(number.doubleValue());
-            case "Boolean" -> value instanceof Boolean;
-            case "Date" -> isDate(value);
-            case "DateTime" -> isInstant(value);
-            case "JSON" -> json(value);
-            default -> value instanceof ObjectRecord record && record.type().equals(type) && !record.isDeleted();
-        };
-    }
-
-    private boolean json(Object value) {
-        if (value == null || value instanceof String || value instanceof Boolean) return true;
-        if (value instanceof Number number) return Double.isFinite(number.doubleValue());
-        if (value instanceof List<?> list) return list.stream().allMatch(this::json);
-        if (value instanceof Map<?, ?> map) return map.keySet().stream().allMatch(String.class::isInstance) && map.values().stream().allMatch(this::json);
-        return false;
-    }
-
-    private boolean isDate(Object value) {
-        try { LocalDate.parse((String) value); return true; }
-        catch (RuntimeException invalid) { return false; }
-    }
-
-    private boolean isInstant(Object value) {
-        try { Instant.parse((String) value); return true; }
-        catch (RuntimeException invalid) { return false; }
+        if (PropertyValues.SCALARS.contains(type) || schema.enums().containsKey(type)) {
+            try {
+                PropertyValues.immutableValue(value); // Public parameter values must have a JSON wire representation.
+                PropertyValues.normalize(schema, type, value, name);
+                return true;
+            } catch (IllegalArgumentException invalid) { return false; }
+        }
+        return (objects == null || objects.contains(type)) && value instanceof ObjectRecord record
+                && record.type().equals(type) && !record.isDeleted();
     }
 }

@@ -63,7 +63,8 @@ final class ActionContinuationState {
         var errors = maps(execution.state().get("warnings")).stream()
                 .map(row -> new ActionResult.Failure((String) row.get("code"), (String) row.get("task"))).toList();
         boolean success = execution.status().equals("COMPLETED") || execution.status().equals("COMPLETED_WITH_WARNINGS");
-        return new ActionResult(success, execution.id(), affected(execution.state()), execution.status(), errors);
+        return new ActionResult(success, execution.id(), affected(execution.state()), execution.status(), errors,
+                ActionResult.changes(affected(execution.state()), ActionEffectAccess.decode(execution.state().get("journal"))));
     }
 
     static Map<String, Object> parameters(Map<String, Object> state, Transaction transaction) {

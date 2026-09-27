@@ -31,12 +31,30 @@ import java.util.Map;
 public final class GraphqlApiRuntime {
     private GraphqlApiRuntime() {}
 
+    public enum ActionMode { TYPED, LEGACY_JSON }
+
     public static GraphQL create(OntologySchema schema, ApplicationService application) {
         return create(schema, application, Map.of());
     }
 
     public static GraphQL create(OntologySchema schema, ApplicationService application,
                                  Map<String, ActionManifest> manifests) {
+        return create(schema, application, manifests, ActionMode.TYPED);
+    }
+
+    public static GraphQL createLegacy(OntologySchema schema, ApplicationService application, Map<String, ActionManifest> manifests) {
+        return create(schema, application, manifests, ActionMode.LEGACY_JSON);
+    }
+
+    public static GraphQL create(OntologySchema schema, ApplicationService application,
+                                 Map<String, ActionManifest> manifests, ActionMode actionMode) {
+        var declared = schema.actionTypes().stream().collect(java.util.stream.Collectors.toMap(type -> type.name(), type -> type));
+        var active = manifests.keySet().stream().sorted().map(name -> {
+            var type = declared.get(name);
+            if (type == null || !name.equals(manifests.get(name).action())) throw new IllegalArgumentException("Unregistered GraphQL action: " + name);
+            return type;
+        }).toList();
+        if (actionMode == ActionMode.TYPED) GraphqlActionTypes.validateNames(schema, active);
         Map<String, graphql.schema.GraphQLEnumType> enums = new java.util.LinkedHashMap<>();
         schema.enums().forEach((name, values) -> {
             var enumeration = graphql.schema.GraphQLEnumType.newEnum().name(name);
@@ -97,23 +115,32 @@ public final class GraphqlApiRuntime {
         }
 
         graphql.schema.GraphQLObjectType.Builder mutation = GraphQLObjectType.newObject().name("Mutation");
-        for (Map.Entry<String, ActionManifest> entry : manifests.entrySet()) {
-            ActionManifest manifest = entry.getValue();
-            mutation.field(GraphQLFieldDefinition.newFieldDefinition().name(lower(entry.getKey()))
-                    .type(Scalars.GraphQLString)
-                    .argument(GraphQLArgument.newArgument().name("input").type(GraphQLNonNull.nonNull(Scalars.GraphQLString)))
-                    .dataFetcher(environment -> {
-                        ApiRequestContext request = request(environment);
-                        String rawInput = environment.getArgument("input");
-                        Map<String, Object> input;
-                        try {
-                            input = new ObjectMapper().readValue(rawInput, new TypeReference<>() {});
-                        } catch (Exception exception) {
-                            throw new IllegalArgumentException("Action input must be valid JSON", exception);
-                        }
-                        String key = environment.getGraphQlContext().get("idempotencyKey");
-                        return new ObjectMapper().writeValueAsString(application.execute(manifest, request.request(), request.principal(), input, key));
-                    }).build());
+        var errors = GraphqlActionTypes.errors();
+        var affected = GraphqlActionTypes.affected();
+        for (var definition : active) {
+            var manifest = manifests.get(definition.name());
+            var field = GraphQLFieldDefinition.newFieldDefinition().name(lower(definition.name()));
+            if (actionMode == ActionMode.LEGACY_JSON) {
+                field.type(Scalars.GraphQLString).argument(GraphQLArgument.newArgument().name("input").type(GraphQLNonNull.nonNull(Scalars.GraphQLString)));
+            } else {
+                field.type(GraphQLNonNull.nonNull(GraphqlActionTypes.result(definition, errors, affected)));
+                if (!definition.parameters().isEmpty()) {
+                    field.argument(GraphQLArgument.newArgument().name("input").type(GraphQLNonNull.nonNull(GraphqlActionTypes.input(definition, schema, enums))));
+                }
+            }
+            mutation.field(field.dataFetcher(environment -> {
+                ApiRequestContext request = request(environment);
+                Map<String, Object> input;
+                if (actionMode == ActionMode.LEGACY_JSON) {
+                    try { input = new ObjectMapper().readValue((String) environment.getArgument("input"), new TypeReference<>() {}); }
+                    catch (Exception invalid) { throw new IllegalArgumentException("Action input must be valid JSON", invalid); }
+                } else {
+                    input = environment.getArgumentOrDefault("input", Map.of());
+                }
+                String key = environment.getGraphQlContext().get("idempotencyKey");
+                var result = application.execute(manifest, request.request(), request.principal(), input, key);
+                return actionMode == ActionMode.LEGACY_JSON ? new ObjectMapper().writeValueAsString(GraphqlActionTypes.legacyResult(result)) : result;
+            }).build());
         }
         GraphQLSchema.Builder graphQLSchema = GraphQLSchema.newSchema().query(query.build());
         if (!manifests.isEmpty()) graphQLSchema.mutation(mutation.build());

@@ -35,6 +35,7 @@ public final class ApplicationService {
     private final AuthorizationMode authorizationMode;
     private final Map<String, List<ComputedFieldDefinition>> computedFields;
     private final ComputedFieldEvaluator computedEvaluator;
+    private final Set<String> enumTypes;
 
     public static ApplicationService fromBundle(StorageProvider storage, AuthorizationService authorization, ActionExecutor actions,
                                                  org.openfoundry.foundation.pack.LoadedPackBundle bundle, AuthorizationMode mode) {
@@ -63,7 +64,8 @@ public final class ApplicationService {
         }
         this.storage = Objects.requireNonNull(storage);
         this.authorization = Objects.requireNonNull(authorization);
-        this.actions = Objects.requireNonNull(actions);
+        this.actions = schema == null ? Objects.requireNonNull(actions) : Objects.requireNonNull(actions).withParameterSchema(schema);
+        this.enumTypes = schema == null ? Set.of() : Set.copyOf(schema.enums().keySet());
         this.manifests = Map.copyOf(manifests);
         this.fieldPolicies = Map.copyOf(fieldPolicies);
         this.definitions = schema == null ? Map.of() : schema.actionTypes().stream()
@@ -326,8 +328,8 @@ public final class ApplicationService {
             String element = type.substring(1, type.length() - 1);
             return list.stream().map(item -> resolve(context, element, item)).toList();
         }
-        if (Set.of("ID", "String", "Int", "Float", "Boolean", "Date", "DateTime", "JSON").contains(type)) return value;
-        if (!properties.containsKey(type) || !(value instanceof String id) || id.isBlank()) {
+        if (org.openfoundry.foundation.spi.schema.PropertyValues.SCALARS.contains(type) || enumTypes.contains(type)) return value;
+        if (!objectTypes.contains(type) || !(value instanceof String id) || id.isBlank()) {
             throw new IllegalArgumentException("Object parameter must be an ID of its declared type");
         }
         var object = storage.getObject(context, type, id);

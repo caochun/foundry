@@ -226,8 +226,8 @@ class GovernedBoundaryTest {
             assertEquals("HTTP", storage.getObject(CONTEXT, "Item", "a").properties().get("name"));
         }
         var gql = GraphqlApiRuntime.create(SCHEMA, app, Map.of("Rename", RENAME));
-        String mutation = "mutation($input: String!) { rename(input: $input) }";
-        var input = ExecutionInput.newExecutionInput(mutation).variables(Map.of("input", "{\"item\":\"a\",\"name\":\"GraphQL\"}"))
+        String mutation = "mutation($input: RenameInput!) { rename(input: $input) { success actionId } }";
+        var input = ExecutionInput.newExecutionInput(mutation).variables(Map.of("input", Map.of("item", "a", "name", "GraphQL")))
                 .graphQLContext(Map.of("request", new ApiRequestContext(CONTEXT, PRINCIPAL))).build();
         assertTrue(gql.execute(input).getErrors().isEmpty());
         assertEquals("GraphQL", storage.getObject(CONTEXT, "Item", "a").properties().get("name"));

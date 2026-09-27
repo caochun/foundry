@@ -49,3 +49,5 @@ JDBC回执随数据库恢复；内存Provider重建后不保留状态，不能�
 以上不代替真实PostgreSQL/国产数据库、外部身份系统和副作用投递验收。
 
 权限模式升级：新的格式1回执附带最小access记录；格式2使用原执行journal。ONTOLOGY_TARGETS据此区分本动作创建的资源和其他已有修改目标，重新检查当前权限。旧回执无该信息时保守校验，不猜测创建授权；请求摘要不变。详见[ADR-0013](adr/0013-ontology-authorization-targets.md)。
+
+类型化结果：新增changes从已存access/journal恢复，并校验其实体序列与affected一致；没有变更依据的旧记录返回UNKNOWN，不能由当前对象状态猜测原变更种类。见ADR-0016。

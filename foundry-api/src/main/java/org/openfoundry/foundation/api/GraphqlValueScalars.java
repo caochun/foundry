@@ -33,7 +33,7 @@ final class GraphqlValueScalars {
 
             @Override
             public Object parseLiteral(Value<?> value, CoercedVariables variables, GraphQLContext context, Locale locale) {
-                try { return normalize(name, literal(value)); }
+                try { return normalize(name, literal(value, variables)); }
                 catch (RuntimeException invalid) { throw new CoercingParseLiteralException("Invalid " + name + " literal"); }
             }
         }).build();
@@ -43,19 +43,25 @@ final class GraphqlValueScalars {
         return value == null ? null : PropertyValues.normalize(EMPTY, type, value, "$scalar");
     }
 
-    private static Object literal(Value<?> input) {
+    private static Object literal(Value<?> input, CoercedVariables variables) {
+        if (input instanceof VariableReference value) return variables.toMap().get(value.getName());
         if (input instanceof StringValue value) return value.getValue();
         if (input instanceof BooleanValue value) return value.isValue();
-        if (input instanceof IntValue value) return value.getValue();
+        if (input instanceof IntValue value) {
+            var number = value.getValue();
+            if (number.bitLength() < 32) return number.intValue();
+            if (number.bitLength() < 64) return number.longValue();
+            return number;
+        }
         if (input instanceof FloatValue value) return value.getValue();
         if (input instanceof NullValue) return null;
         if (input instanceof EnumValue value) return value.getName();
-        if (input instanceof ArrayValue value) return value.getValues().stream().map(GraphqlValueScalars::literal).toList();
+        if (input instanceof ArrayValue value) return value.getValues().stream().map(item -> literal(item, variables)).toList();
         if (input instanceof ObjectValue value) {
             var result = new java.util.LinkedHashMap<String, Object>();
             for (var field : value.getObjectFields()) {
                 if (result.containsKey(field.getName())) throw new IllegalArgumentException("Duplicate object field");
-                result.put(field.getName(), literal(field.getValue()));
+                result.put(field.getName(), literal(field.getValue(), variables));
             }
             return result;
         }
