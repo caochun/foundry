@@ -16,6 +16,11 @@
     <dependencies>
         <dependency>
             <groupId>org.openfoundry</groupId>
+            <artifactId>foundry-schema</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.openfoundry</groupId>
             <artifactId>foundry-validation</artifactId>
             <version>${project.version}</version>
         </dependency>

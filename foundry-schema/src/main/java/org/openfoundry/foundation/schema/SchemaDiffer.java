@@ -17,6 +17,8 @@ import java.util.Set;
 public final class SchemaDiffer {
     public SchemaDiff diff(OntologySchema previous, OntologySchema next) {
         List<SchemaChange> changes = new ArrayList<>();
+        if (!previous.namespace().equals(next.namespace())) changes.add(new SchemaChange("namespace", "schema namespace changed", MigrationClass.BREAKING));
+        if (!previous.version().equals(next.version())) changes.add(new SchemaChange("version", "declared schema version changed", MigrationClass.SAFE));
         for (var entry : next.enums().entrySet()) {
             var old = previous.enums().get(entry.getKey());
             if (old == null) changes.add(new SchemaChange("enum." + entry.getKey(), "enum added", MigrationClass.SAFE));
@@ -30,6 +32,7 @@ public final class SchemaDiffer {
         compareObjects(previous, next, changes);
         compareLinks(previous, next, changes);
         compareActions(previous, next, changes);
+        changes.sort(java.util.Comparator.comparing(SchemaChange::path).thenComparing(SchemaChange::detail));
         return new SchemaDiff(changes);
     }
 

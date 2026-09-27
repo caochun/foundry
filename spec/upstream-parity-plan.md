@@ -43,7 +43,8 @@
 - [x] 受控文本搜索：显式TERMS/PHRASE上游模式、可见字段评分/高亮/分页及REST/GraphQL入口，Java/REST双时间搜索。
 - [x] 默认GraphQL复数Connection契约、显式旧列表模式、first/after/last/before/零条查询及授权后双向分页；REST采用同一页模型。
 - [ ] 时间一致的关系API、关系写入声明约束、批量/订阅API、结构值筛选、原生存储搜索/聚合/查询下推与跨读取快照。
-- [ ] 持久Schema Registry、破坏性变化分类、迁移与漂移门禁。
+- [x] 持久Schema Registry、完整快照/登记审批证据、顺序敏感指纹、并发版本门禁、启动去重及requireCurrent漂移检查。
+- [ ] 注册表与存储激活/在途写入版本绑定、实际迁移执行/数据校验、物理模式漂移门禁、生产启动装配及审批治理。
 
 ## F4：可靠同步、事件与交付
 
@@ -175,3 +176,11 @@ GraphQL默认使用具名Input/Result；旧调用方可以显式选择LEGACY_JSO
 默认GraphQL复数字段现为上游Connection形状，原数组模式明确选择LEGACY_LIST，原Connection后缀保留。独立探针确认末页、边界截断和可见总数，旧数组仍可调用。修复了固定上游last单独使用及before首部未裁剪的缺陷，差异和迁移见ADR-0020。
 
 原生查询/搜索/聚合下推、外部权限一致快照、Consent/ObjectSet及其余核心范围继续，完整目标保持active。运行库与服务JAR未改动。
+
+## F3持久Schema Registry验证记录
+
+2026-09-28：常规根reactor529项，其中Foundry419项，全部通过，无失败/错误/跳过。新增17项覆盖内存/JDBC登记契约、完整模型回读、审批说明、文件恢复、注册表范围、单连接池/默认非自动提交、损坏历史拒绝、头更新失败回滚及独立JVM竞争和提交前后退出。
+
+启动applyIfChanged在数据库锁内去重，显式expectedVersion防止过期计划覆盖；requireCurrent检测配置漂移。新增指纹保留Action参数顺序，旧编译摘要及回执不改。独立探针确认重建后不重复登记、主权限目标顺序漂移拒绝、未批准变更/过期版本拒绝且旧快照可读取。
+
+注册表没有执行数据迁移，JdbcStorageProvider.applySchema和在途写入尚未绑定持久版本；生产装配、数据校验、物理漂移和实际目标库仍待完成。该剩余项已拆开记录，见ADR-0021；完整目标保持active。
