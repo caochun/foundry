@@ -36,7 +36,7 @@ public record ObjectQueryResult(List<ObjectRecord> items, int totalCount, int of
         }
     }
 
-    private static String cursor(int position) {
+    static String cursor(int position) {
         return Base64.getEncoder().encodeToString(("cursor:" + position).getBytes(StandardCharsets.UTF_8));
     }
 

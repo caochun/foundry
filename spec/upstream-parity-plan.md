@@ -40,7 +40,8 @@
 - [x] 类型化Action GraphQL输入/结果，Schema感知枚举/标量及递归列表参数，显式旧JSON兼容入口。
 - [x] 对象标量/枚举过滤、排序、授权后分页与可见计数；共享REST/GraphQL Connection、隐藏字段查询拒绝及双时间Java/REST读取。
 - [x] 受控COUNT/SUM/AVG/MIN/MAX、分组/组排序/分页及totalGroups；REST/GraphQL聚合和Java/REST双时间统计。
-- [ ] 时间一致的关系API、关系写入声明约束、批量/订阅API、搜索/反向分页/结构值筛选、原生存储聚合/查询下推与跨读取快照。
+- [x] 受控文本搜索：显式TERMS/PHRASE上游模式、可见字段评分/高亮/分页及REST/GraphQL入口，Java/REST双时间搜索。
+- [ ] 时间一致的关系API、关系写入声明约束、批量/订阅API、反向分页/结构值筛选、原生存储搜索/聚合/查询下推与跨读取快照。
 - [ ] 持久Schema Registry、破坏性变化分类、迁移与漂移门禁。
 
 ## F4：可靠同步、事件与交付
@@ -157,3 +158,11 @@ GraphQL默认使用具名Input/Result；旧调用方可以显式选择LEGACY_JSO
 2026-09-28：常规根reactor472项，其中Foundry362项，全部通过，无失败/错误/跳过。新增23项覆盖memory/H2五种函数、COUNT空值差异、空集合、复合及JSON分组、130个隐藏对象、敏感/角色字段权限、别名冲突、组排序/分页/limit=0、时间历史、租户隔离和撤权、数值精度/溢出及REST/GraphQL。
 
 独立探针确认可见总数3、SUM=4、AVG=2，隐藏对象及独有组不出现，limit=1时总可见组仍为2。聚合各值及totalGroups来自一次对象读取的输入集合；原生Storage SPI聚合、SQL/授权下推、外部权限一致快照和生产规模验收仍待完成。搜索/Consent/ObjectSet及其他上游能力继续推进，完整目标保持active，见ADR-0018。
+
+## F3受控文本搜索验证记录
+
+2026-09-28：常规根reactor493项，其中Foundry383项，全部通过，无失败/错误/跳过。新增21项覆盖memory/H2两种上游搜索模式、评分和同分排序、中文/Unicode/特殊字符、130条隐藏对象、字段权限/角色及高亮、空字段、过滤、双时间/删除/租户/撤权、分页/越界/limit=0和GET/POST/GraphQL。
+
+独立探针确认两种Provider一致返回可见命中数2，TERMS首条得分3、PHRASE各1分，隐藏文本不影响得分或高亮。固定上游memory按词计次数、PostgreSQL按整句计字段的差异以显式模式保留；Java默认可见声明文本属性，不按任意运行时字符串兜底。
+
+原生Storage SPI搜索、SQL/索引/授权下推、资源预算及生产规模验收仍待完成；JDK GET的search路径保留规则和其他差异见ADR-0019。Consent/ObjectSet/反向分页及完整覆盖目标继续，未把应用层实现当作所有存储集成完成。

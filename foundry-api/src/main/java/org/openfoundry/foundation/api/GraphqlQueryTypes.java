@@ -19,11 +19,15 @@ final class GraphqlQueryTypes {
         var names = new HashSet<String>();
         reserve(names, "SortDirection");
         reserve(names, "PageInfo");
+        reserve(names, "SearchMode");
         for (String name : GraphqlAggregateTypes.NAMES) reserve(names, name);
         for (String scalar : scalarTypes(schema)) reserve(names, scalar + "Filter");
         var queries = new HashSet<String>();
         for (var object : schema.objectTypes()) {
             for (String suffix : List.of("Filter", "OrderBy", "Connection", "Edge")) reserve(names, object.name() + suffix);
+            reserve(names, "SearchHit_" + object.name());
+            reserve(names, "SearchResult_" + object.name());
+            reserve(queries, "search" + object.name() + "s");
             String singular = Character.toLowerCase(object.name().charAt(0)) + object.name().substring(1);
             for (String suffix : List.of("", "s", "sConnection", "Aggregate")) reserve(queries, singular + suffix);
             for (var field : object.properties()) {
@@ -160,6 +164,8 @@ final class GraphqlQueryTypes {
             result.append("type ").append(name).append("Edge { node: ").append(name).append("! cursor: String! }\n");
             result.append("type ").append(name).append("Connection { edges: [").append(name).append("Edge!]! pageInfo: PageInfo! totalCount: Int! }\n");
         }
+        result.append("enum SearchMode { TERMS PHRASE }\n");
+        schema.objectTypes().forEach(object -> result.append(GraphqlSearchTypes.sdl(object.name())));
         result.append(GraphqlAggregateTypes.sdl());
         return result.toString();
     }

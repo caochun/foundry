@@ -64,7 +64,10 @@ public final class JdkRestServer implements AutoCloseable {
     private void handleAuthenticated(HttpExchange exchange) throws IOException {
         ApiRequestContext context = requestContext.get();
         ApiResponse response;
-        if ("GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+        if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && exchange.getRequestURI().getPath().matches("/api/v1/[^/]+/search")) {
+            String type = exchange.getRequestURI().getPath().split("/")[3];
+            response = router.search(context.request(), context.principal(), type, SearchQuery.fromParameters(parameters(exchange.getRequestURI().getRawQuery())));
+        } else if ("GET".equalsIgnoreCase(exchange.getRequestMethod())) {
             response = router.get(context.request(), context.principal(), exchange.getRequestURI().getPath(), QueryOptions.defaults());
         } else if ("POST".equalsIgnoreCase(exchange.getRequestMethod())
                 && exchange.getRequestURI().getPath().startsWith("/api/v1/actions/")) {
@@ -82,16 +85,31 @@ public final class JdkRestServer implements AutoCloseable {
                 response = ApiResponse.notFound();
             }
         } else if ("POST".equalsIgnoreCase(exchange.getRequestMethod())
-                && exchange.getRequestURI().getPath().matches("/api/v1/[^/]+/(query|aggregate)")) {
+                && exchange.getRequestURI().getPath().matches("/api/v1/[^/]+/(query|aggregate|search)")) {
             String type = exchange.getRequestURI().getPath().split("/")[3];
             Map<String, Object> input = mapper.readValue(exchange.getRequestBody(), new com.fasterxml.jackson.core.type.TypeReference<>() {});
-            response = exchange.getRequestURI().getPath().endsWith("/aggregate")
-                    ? router.aggregate(context.request(), context.principal(), type, AggregateQuery.fromJson(input))
-                    : router.query(context.request(), context.principal(), type, ObjectQuery.fromJson(input));
+            String operation = exchange.getRequestURI().getPath().split("/")[4];
+            response = switch (operation) {
+                case "aggregate" -> router.aggregate(context.request(), context.principal(), type, AggregateQuery.fromJson(input));
+                case "search" -> router.search(context.request(), context.principal(), type, SearchQuery.fromJson(input));
+                default -> router.query(context.request(), context.principal(), type, ObjectQuery.fromJson(input));
+            };
         } else {
             response = ApiResponse.badRequest("unsupported HTTP method");
         }
         write(exchange, response);
+    }
+
+    private static Map<String, String> parameters(String query) {
+        var values = new LinkedHashMap<String, String>();
+        if (query == null || query.isEmpty()) return values;
+        for (String pair : query.split("&", -1)) {
+            String[] parts = pair.split("=", 2);
+            String name = java.net.URLDecoder.decode(parts[0], StandardCharsets.UTF_8);
+            String value = parts.length == 2 ? java.net.URLDecoder.decode(parts[1], StandardCharsets.UTF_8) : "";
+            if (values.putIfAbsent(name, value) != null) throw new IllegalArgumentException("Duplicate search parameter");
+        }
+        return values;
     }
 
     private void write(HttpExchange exchange, ApiResponse response) throws IOException {

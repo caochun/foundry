@@ -144,6 +144,19 @@ public final class ApplicationService {
         return aggregation.evaluate(rows);
     }
 
+    public SearchResult searchObjects(RequestContext context, SecurityPrincipal principal, String type, SearchQuery query) {
+        requireContext(context, principal);
+        if (schema == null || !objectTypes.contains(type)) throw new IllegalArgumentException("Search requires a registered object type");
+        var visible = visibleFields(principal, type);
+        var search = new ObjectSearchPlan(schema, properties.get(type), visible, query);
+        var predicate = new ObjectQueryPlan(schema, properties.get(type), visible).predicate(query.filter());
+        var view = query.sourceView();
+        var rows = storage.queryObjects(context, type, view).stream()
+                .filter(object -> authorization.check(context, principal, "viewer", object.key()))
+                .filter(predicate).toList();
+        return search.evaluate(rows, object -> project(context, principal, object, view));
+    }
+
     private static QueryOptions allRows(QueryOptions options) {
         return new QueryOptions(Integer.MAX_VALUE, 0, options.asOfValidTime(), options.asOfRecordedTime(), options.includeDeleted());
     }
