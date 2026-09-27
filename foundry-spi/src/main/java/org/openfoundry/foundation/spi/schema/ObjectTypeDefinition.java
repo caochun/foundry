@@ -3,7 +3,12 @@ package org.openfoundry.foundation.spi.schema;
 import java.util.List;
 import java.util.Objects;
 
-public record ObjectTypeDefinition(String name, List<PropertyDefinition> properties, List<String> interfaces, List<String> constraints, List<LinkFieldDefinition> linkFields) {
+public record ObjectTypeDefinition(String name, List<PropertyDefinition> properties, List<String> interfaces, List<String> constraints, List<LinkFieldDefinition> linkFields, List<ComputedFieldDefinition> computedFields) {
+    public ObjectTypeDefinition(String name, List<PropertyDefinition> properties, List<String> interfaces,
+                                    List<String> constraints, List<LinkFieldDefinition> linkFields) {
+        this(name, properties, interfaces, constraints, linkFields, List.of());
+    }
+
     public ObjectTypeDefinition(String name, List<PropertyDefinition> properties, List<String> interfaces, List<String> constraints) {
         this(name, properties, interfaces, constraints, List.of());
     }
@@ -16,6 +21,7 @@ public record ObjectTypeDefinition(String name, List<PropertyDefinition> propert
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("name must not be blank");
         }
+        computedFields = List.copyOf(computedFields);
         linkFields = List.copyOf(linkFields);
         interfaces = List.copyOf(interfaces);
         constraints = List.copyOf(constraints);

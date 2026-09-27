@@ -130,21 +130,28 @@ public final class SchemaCompiler {
         StringBuilder result = new StringBuilder()
                 .append(schema.namespace()).append('|').append(schema.version());
         schema.interfaces().stream().sorted(java.util.Comparator.comparing(org.openfoundry.foundation.spi.schema.InterfaceDefinition::name))
-                .forEach(type -> result.append("|I:").append(type.name()).append(type.interfaces()).append(type.constraints()).append(properties(type.properties())).append(linkFields(type.linkFields())));
+                .forEach(type -> result.append("|I:").append(type.name()).append(type.interfaces()).append(type.constraints()).append(properties(type.properties())).append(linkFields(type.linkFields())).append(computedFields(type.computedFields())));
         schema.enums().entrySet().stream().sorted(Map.Entry.comparingByKey())
                 .forEach(entry -> result.append("|E:").append(entry.getKey()).append(entry.getValue().stream().sorted().toList()));
         schema.objectTypes().stream().sorted(java.util.Comparator.comparing(ObjectTypeDefinition::name))
-                .forEach(type -> result.append("|O:").append(type.name()).append(type.interfaces()).append(type.constraints()).append(properties(type.properties())).append(linkFields(type.linkFields())));
+                .forEach(type -> result.append("|O:").append(type.name()).append(type.interfaces()).append(type.constraints()).append(properties(type.properties())).append(linkFields(type.linkFields())).append(computedFields(type.computedFields())));
         schema.linkTypes().stream().sorted(java.util.Comparator.comparing(LinkTypeDefinition::name))
                 .forEach(type -> result.append("|L:").append(type.name()).append(':')
                         .append(type.fromType()).append(':').append(type.toType()).append(':')
-                        .append(type.cardinality()).append(type.interfaces()).append(type.constraints()).append(properties(type.properties())).append(linkFields(type.linkFields())));
+                        .append(type.cardinality()).append(type.interfaces()).append(type.constraints()).append(properties(type.properties())).append(linkFields(type.linkFields())).append(computedFields(type.computedFields())));
         schema.actionTypes().stream().sorted(java.util.Comparator.comparing(ActionTypeDefinition::name))
                 .forEach(type -> result.append("|A:").append(type.name()).append(':')
                         .append(type.permission()).append(':')
                         .append(type.parameters().stream().map(p -> p.name() + ':' + p.type() + ':' + p.required())
                                 .sorted().toList()));
         return result.toString();
+    }
+
+    private static String computedFields(List<org.openfoundry.foundation.spi.schema.ComputedFieldDefinition> fields) {
+        if (fields.isEmpty()) return "";
+        return "|C:" + fields.stream().sorted(java.util.Comparator.comparing(org.openfoundry.foundation.spi.schema.ComputedFieldDefinition::name))
+                .map(field -> org.openfoundry.foundation.spi.schema.PropertyValues.canonical(java.util.Arrays.asList(field.name(), field.type(),
+                        field.required(), field.function(), field.arguments(), field.cache().name(), field.ttl(), field.sensitive()))).toList().toString();
     }
 
     private static String linkFields(List<org.openfoundry.foundation.spi.schema.LinkFieldDefinition> fields) {

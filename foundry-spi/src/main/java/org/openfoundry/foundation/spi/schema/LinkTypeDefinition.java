@@ -8,7 +8,13 @@ public record LinkTypeDefinition(
         String fromType,
         String toType,
         Cardinality cardinality,
-        List<PropertyDefinition> properties, List<String> interfaces, List<String> constraints, List<LinkFieldDefinition> linkFields) {
+        List<PropertyDefinition> properties, List<String> interfaces, List<String> constraints, List<LinkFieldDefinition> linkFields, List<ComputedFieldDefinition> computedFields) {
+
+    public LinkTypeDefinition(String name, String fromType, String toType, Cardinality cardinality,
+                              List<PropertyDefinition> properties, List<String> interfaces, List<String> constraints,
+                              List<LinkFieldDefinition> linkFields) {
+        this(name, fromType, toType, cardinality, properties, interfaces, constraints, linkFields, List.of());
+    }
 
     public LinkTypeDefinition(String name, String fromType, String toType, Cardinality cardinality,
                               List<PropertyDefinition> properties, List<String> interfaces, List<String> constraints) {
@@ -24,6 +30,7 @@ public record LinkTypeDefinition(
         requireText(fromType, "fromType");
         requireText(toType, "toType");
         Objects.requireNonNull(cardinality, "cardinality must not be null");
+        computedFields = List.copyOf(computedFields);
         linkFields = List.copyOf(linkFields);
         interfaces = List.copyOf(interfaces);
         constraints = List.copyOf(constraints);

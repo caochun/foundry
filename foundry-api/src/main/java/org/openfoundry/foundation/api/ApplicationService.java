@@ -9,6 +9,7 @@ import org.openfoundry.foundation.spi.schema.ActionTypeDefinition;
 import org.openfoundry.foundation.spi.schema.OntologySchema;
 import org.openfoundry.foundation.spi.schema.PropertyDefinition;
 import org.openfoundry.foundation.spi.schema.LinkFieldDefinition;
+import org.openfoundry.foundation.spi.schema.ComputedFieldDefinition;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -32,6 +33,8 @@ public final class ApplicationService {
     private final Set<String> relationTypes;
     private final Set<String> objectTypes;
     private final AuthorizationMode authorizationMode;
+    private final Map<String, List<ComputedFieldDefinition>> computedFields;
+    private final ComputedFieldEvaluator computedEvaluator;
 
     public static ApplicationService fromBundle(StorageProvider storage, AuthorizationService authorization, ActionExecutor actions,
                                                  org.openfoundry.foundation.pack.LoadedPackBundle bundle, AuthorizationMode mode) {
@@ -71,6 +74,9 @@ public final class ApplicationService {
             schema.linkTypes().forEach(type -> propertyMap.put(type.name(), type.properties()));
         }
         this.properties = Map.copyOf(propertyMap);
+        this.computedFields = schema == null ? Map.of() : schema.objectTypes().stream()
+                .collect(Collectors.toUnmodifiableMap(type -> type.name(), type -> type.computedFields()));
+        this.computedEvaluator = schema == null ? null : new ComputedFieldEvaluator(storage, schema);
         var navigation = new LinkedHashMap<String, Map<String, LinkFieldDefinition>>();
         if (schema != null) {
             org.openfoundry.foundation.spi.schema.PropertyValues.requireSchema(schema);
@@ -93,14 +99,14 @@ public final class ApplicationService {
         requireContext(context, principal);
         if (!authorization.check(context, principal, "viewer", new EntityKey(type, id))) return null;
         var object = storage.getObject(context, type, id);
-        return object == null || object.isDeleted() ? null : redact(principal, object);
+        return object == null || object.isDeleted() ? null : project(context, principal, object, QueryOptions.defaults());
     }
 
     public List<ObjectRecord> listObjects(RequestContext context, SecurityPrincipal principal, String type, QueryOptions options) {
         requireContext(context, principal);
         return storage.queryObjects(context, type, options).stream()
                 .filter(object -> authorization.check(context, principal, "viewer", object.key()))
-                .map(object -> redact(principal, object)).toList();
+                .map(object -> project(context, principal, object, options)).toList();
     }
 
     public List<HistorySnapshot> history(RequestContext context, SecurityPrincipal principal, EntityKey key) {
@@ -162,7 +168,58 @@ public final class ApplicationService {
                     link.createdAt(), link.updatedAt(), link.deletedAt(), link.validFrom(), link.validTo(),
                     link.lastTransactionId(), link.lastActionId(), visible(principal, link.type(), link.properties()));
         }
-        return object.isDeleted() ? null : redact(principal, object);
+        return object.isDeleted() ? null : project(context, principal, object, QueryOptions.defaults());
+    }
+
+    public Object readComputedField(RequestContext context, SecurityPrincipal principal, EntityKey source, String name) {
+        return readComputedField(context, principal, source, name, QueryOptions.defaults());
+    }
+
+    public Object readComputedField(RequestContext context, SecurityPrincipal principal, EntityKey source, String name, QueryOptions view) {
+        requireContext(context, principal);
+        var field = computedFields.getOrDefault(source.type(), List.of()).stream().filter(value -> value.name().equals(name))
+                .findFirst().orElseThrow(() -> new IllegalArgumentException("Unknown computed field"));
+        if (!authorization.check(context, principal, "viewer", source) || !visibleComputedField(principal, source.type(), field)) return null;
+        if (view.asOfValidTime() != null) {
+            if (!TemporalHistory.active(storage.getObjectAtTime(context, source.type(), source.id(), view.asOfValidTime(), view.asOfRecordedTime()))) return null;
+        } else {
+            var object = storage.getObject(context, source.type(), source.id());
+            if (object == null || object.isDeleted()) return null;
+        }
+        return computedValue(context, principal, source, field, view);
+    }
+
+    private Object computedValue(RequestContext context, SecurityPrincipal principal, EntityKey source,
+                                 ComputedFieldDefinition field, QueryOptions view) {
+        return computedEvaluator.evaluate(context, source, field.name(), view, link -> {
+            if (authorizationMode == AuthorizationMode.STRICT_RESOURCES
+                    && !authorization.check(context, principal, "viewer", new EntityKey(link.type(), link.id()))) return false;
+            var target = field.direction() == StorageProvider.Direction.INBOUND ? link.from() : link.to();
+            if (!authorization.check(context, principal, "viewer", target)) return false;
+            if (view.asOfValidTime() != null) {
+                return TemporalHistory.active(storage.getObjectAtTime(context, target.type(), target.id(), view.asOfValidTime(), view.asOfRecordedTime()));
+            }
+            var object = storage.getObject(context, target.type(), target.id());
+            return object != null && !object.isDeleted();
+        });
+    }
+
+    private boolean visibleComputedField(SecurityPrincipal principal, String owner, ComputedFieldDefinition field) {
+        var policy = fieldPolicies.get(owner);
+        if (policy == null || policy.storedFieldsOnly()) return !field.sensitive();
+        return policy.alwaysVisible().contains(field.name()) || principal.roles().stream()
+                .anyMatch(role -> policy.fieldsByRole().getOrDefault(role, Set.of()).contains(field.name()));
+    }
+
+    private ObjectRecord project(RequestContext context, SecurityPrincipal principal, ObjectRecord object, QueryOptions view) {
+        var values = new LinkedHashMap<>(visible(principal, object.type(), object.properties()));
+        if (!object.isDeleted()) {
+            for (var field : computedFields.getOrDefault(object.type(), List.of())) {
+                if (visibleComputedField(principal, object.type(), field)) values.put(field.name(), computedValue(context, principal, object.key(), field, view));
+            }
+        }
+        return new ObjectRecord(object.tenantId(), object.type(), object.id(), object.version(), object.createdAt(), object.updatedAt(),
+                object.deletedAt(), object.lastTransactionId(), object.lastActionId(), values);
     }
 
     private boolean visibleLinkField(SecurityPrincipal principal, String owner, LinkFieldDefinition field) {
@@ -284,11 +341,6 @@ public final class ApplicationService {
             if (value instanceof List<?> list && !permittedReferences(context, principal, permission, list)) return false;
         }
         return true;
-    }
-
-    private ObjectRecord redact(SecurityPrincipal principal, ObjectRecord object) {
-        return new ObjectRecord(object.tenantId(), object.type(), object.id(), object.version(), object.createdAt(), object.updatedAt(),
-                object.deletedAt(), object.lastTransactionId(), object.lastActionId(), visible(principal, object.type(), object.properties()));
     }
 
     private Map<String, Object> visible(SecurityPrincipal principal, String type, Map<String, Object> values) {

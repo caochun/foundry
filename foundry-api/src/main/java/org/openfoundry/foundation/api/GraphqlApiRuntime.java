@@ -50,6 +50,7 @@ public final class GraphqlApiRuntime {
             definition.interfaces().forEach(name -> iface.withInterface(graphql.schema.GraphQLTypeReference.typeRef(name)));
             definition.properties().forEach(property -> iface.field(field(property, enums)));
             definition.linkFields().forEach(property -> iface.field(linkField(property, application)));
+            definition.computedFields().forEach(property -> iface.field(computedField(property)));
             interfaces.put(definition.name(), iface.build());
         }
         Map<String, GraphQLObjectType> objectTypes = new java.util.LinkedHashMap<>();
@@ -58,6 +59,7 @@ public final class GraphqlApiRuntime {
             definition.interfaces().forEach(name -> object.withInterface(interfaces.get(name)));
             definition.properties().forEach(property -> object.field(field(property, enums)));
             definition.linkFields().forEach(property -> object.field(linkField(property, application)));
+            definition.computedFields().forEach(property -> object.field(computedField(property)));
             objectTypes.put(definition.name(), object.build());
         }
 
@@ -140,6 +142,11 @@ public final class GraphqlApiRuntime {
             }
             throw new IllegalStateException("Unsupported GraphQL entity source");
         }).build();
+    }
+
+    private static GraphQLFieldDefinition computedField(org.openfoundry.foundation.spi.schema.ComputedFieldDefinition field) {
+        return GraphQLFieldDefinition.newFieldDefinition().name(field.name()).type(Scalars.GraphQLInt)
+                .dataFetcher(environment -> ((ObjectRecord) environment.getSource()).properties().get(field.name())).build();
     }
 
     private static String entityType(Object source) {

@@ -119,6 +119,19 @@ class PackCompositionTest {
     }
 
     @Test
+    void computedRelationshipReferencesParticipateInPackVisibility() throws Exception {
+        var core = pack("core", "example.core", "1.0.0", "", """
+                type Item @objectType { id: ID! @primary }
+                type Edge @linkType(from: "Item", to: "Item", cardinality: MANY_TO_MANY) { id: ID! @primary }
+                """);
+        var app = pack("app", "example.app", "1.0.0", "", "interface Counts { total: Int @computed(fn: \"countLinks\", args: {type: Edge}) }");
+        assertThrows(PackLoadException.class, () -> new DomainPackLoader().loadBundle(List.of(core, app)));
+        Files.writeString(app.resolve("pack.yaml"), manifest("app", "example.app", "1.0.0", "dependencies: {example.core: '>=1.0.0'}\n"));
+        var bundle = new DomainPackLoader().loadBundle(List.of(core, app));
+        assertEquals("Edge", bundle.ontology().schema().interfaces().getFirst().computedFields().getFirst().linkType());
+    }
+
+    @Test
     void missingAssetsSymlinkEscapesAndDuplicateYamlKeysFailBeforeBootstrap() throws Exception {
         var app = pack("app", "example.app", "1.0.0", "seed: [seed.yaml]\n", "type Item @objectType { id: ID! @primary }");
         assertThrows(PackLoadException.class, () -> new DomainPackLoader().loadBundle(List.of(app)));

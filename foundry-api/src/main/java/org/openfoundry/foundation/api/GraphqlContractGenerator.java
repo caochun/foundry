@@ -12,18 +12,21 @@ public final class GraphqlContractGenerator {
             result.append("interface ").append(type.name()).append(implementsTypes(type.interfaces())).append(" {\n");
             type.properties().forEach(property -> appendProperty(result, property));
             type.linkFields().forEach(field -> appendLinkField(result, field));
+            type.computedFields().forEach(field -> result.append("  ").append(field.name()).append(": ").append(field.type()).append("\n"));
             result.append("}\n\n");
         }
         for (ObjectTypeDefinition object : schema.objectTypes()) {
             result.append("type ").append(object.name()).append(implementsTypes(object.interfaces())).append(" {\n");
             object.properties().forEach(property -> appendProperty(result, property));
             object.linkFields().forEach(field -> appendLinkField(result, field));
+            object.computedFields().forEach(field -> result.append("  ").append(field.name()).append(": ").append(field.type()).append("\n"));
             result.append("}\n\n");
         }
         for (var type : schema.linkTypes()) {
             result.append("type ").append(type.name()).append(implementsTypes(type.interfaces())).append(" {\n");
             type.properties().forEach(property -> appendProperty(result, property));
             type.linkFields().forEach(field -> appendLinkField(result, field));
+            type.computedFields().forEach(field -> result.append("  ").append(field.name()).append(": ").append(field.type()).append("\n"));
             result.append("}\n\n");
         }
         result.append("type Query {\n");

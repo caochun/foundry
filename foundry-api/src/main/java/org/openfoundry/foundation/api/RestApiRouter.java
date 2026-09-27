@@ -29,6 +29,13 @@ public final class RestApiRouter {
         if (parts.length == 6 && "history".equals(parts[5])) {
             return ApiResponse.ok(application.history(context, principal, new EntityKey(type, parts[4])));
         }
+        if (parts.length == 7 && "computed".equals(parts[5])) {
+            try {
+                return ApiResponse.ok(application.readComputedField(context, principal, new EntityKey(type, parts[4]), parts[6], options));
+            } catch (IllegalArgumentException invalid) {
+                return ApiResponse.badRequest("Invalid computed field query");
+            }
+        }
         if (parts.length == 7 && "links".equals(parts[5])) {
             try {
                 return ApiResponse.ok(application.readLinkField(context, principal, new EntityKey(type, parts[4]), parts[6], options));

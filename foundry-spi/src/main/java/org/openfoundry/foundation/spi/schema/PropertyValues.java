@@ -35,6 +35,7 @@ public final class PropertyValues {
             if (!objectNames.contains(link.fromType()) || !objectNames.contains(link.toType())) throw new IllegalArgumentException("Unknown relationship endpoint type");
         }
         requireLinkFields(schema);
+        requireComputedFields(schema);
         var interfaces = new LinkedHashMap<String, InterfaceDefinition>();
         schema.interfaces().forEach(type -> interfaces.put(type.name(), type));
         var completed = new java.util.HashSet<String>();
@@ -100,6 +101,39 @@ public final class PropertyValues {
             if (!field.many() && !single) {
                 throw new IllegalArgumentException("Relationship cardinality requires a list field: " + field.name());
             }
+        }
+    }
+
+    private static void requireComputedFields(OntologySchema schema) {
+        var links = new LinkedHashMap<String, LinkTypeDefinition>();
+        schema.linkTypes().forEach(type -> links.put(type.name(), type));
+        var interfaces = new LinkedHashMap<String, InterfaceDefinition>();
+        schema.interfaces().forEach(type -> interfaces.put(type.name(), type));
+        schema.interfaces().forEach(type -> requireComputedFields(null, type.properties(), type.linkFields(), type.computedFields(), type.interfaces(), links, interfaces));
+        schema.objectTypes().forEach(type -> requireComputedFields(type.name(), type.properties(), type.linkFields(), type.computedFields(), type.interfaces(), links, interfaces));
+        schema.linkTypes().forEach(type -> requireComputedFields(type.name(), type.properties(), type.linkFields(), type.computedFields(), type.interfaces(), links, interfaces));
+    }
+
+    private static void requireComputedFields(String owner, List<PropertyDefinition> properties, List<LinkFieldDefinition> navigation,
+                                              List<ComputedFieldDefinition> fields, List<String> parents,
+                                              Map<String, LinkTypeDefinition> links, Map<String, InterfaceDefinition> interfaces) {
+        var names = new java.util.HashSet<String>();
+        properties.forEach(field -> names.add(field.name()));
+        navigation.forEach(field -> names.add(field.name()));
+        for (String parentName : parents) {
+            var parent = interfaces.get(parentName);
+            if (parent == null || !fields.containsAll(parent.computedFields())) throw new IllegalArgumentException("Unresolved computed field inheritance: " + parentName);
+        }
+        for (var field : fields) {
+            if (!names.add(field.name())) throw new IllegalArgumentException("Conflicting stored, relationship or computed field: " + field.name());
+            if (!field.function().equals("countLinks")) throw new IllegalArgumentException("Unknown computed function: " + field.function());
+            if (field.cache() != ComputedFieldDefinition.Cache.LAZY || field.ttl() != null) throw new IllegalArgumentException("Only LAZY computed fields are implemented");
+            if (!field.type().equals("Int")) throw new IllegalArgumentException("countLinks must return Int");
+            if (!Set.of("type", "direction").containsAll(field.arguments().keySet())) throw new IllegalArgumentException("Unknown countLinks argument");
+            var link = links.get(field.linkType());
+            if (link == null) throw new IllegalArgumentException("Unknown computed relationship: " + field.linkType());
+            String endpoint = field.direction() == org.openfoundry.foundation.spi.StorageProvider.Direction.INBOUND ? link.toType() : link.fromType();
+            if (owner != null && !owner.equals(endpoint)) throw new IllegalArgumentException("Computed relationship direction does not match owner: " + field.name());
         }
     }
 

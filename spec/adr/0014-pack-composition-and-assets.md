@@ -35,3 +35,5 @@
 ApplicationService.fromBundle使用组合schema、actions和加载的字段策略。原Library验证现在通过loadBundle和PackSeeder装配，不再由测试手工创建其目录记录。真实OpenFGA集成同时验证模型、字段角色隐藏与虚拟关系读取；JSON模型仍由官方工具预先生成，并与加载到的DSL核对SHA，不能算作Java模型编译部署能力。
 
 旧数据Schema迁移、FGA生成/合并/发布及元组管理、连接器运行/同步检查点、完整ODL、动态插件激活、生产运维等仍按总计划继续。本次只在隔离测试中初始化种子，未改动运行中的Mirror数据库。
+
+后续：[ADR-0015](0015-lazy-computed-fields.md)已接通LAZY/countLinks计算字段，且计算依赖参与Pack引用验证；其余ODL和运行能力边界仍按总计划推进。

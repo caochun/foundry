@@ -29,6 +29,7 @@ import java.util.LinkedHashMap;
 import java.util.Set;
 import org.openfoundry.foundation.spi.schema.InterfaceDefinition;
 import org.openfoundry.foundation.spi.schema.LinkFieldDefinition;
+import org.openfoundry.foundation.spi.schema.ComputedFieldDefinition;
 import org.openfoundry.foundation.spi.StorageProvider.Direction;
 
 /** Parses the ODL subset used by Foundation v0.1. ODL is GraphQL SDL plus directives. */
@@ -94,6 +95,16 @@ public final class OdlParser {
                 default -> List.<String>of();
             };
             for (String name : names) references.add(requiredStringArgument(directive, name));
+            if (directive.getName().equals("computed") && directive.getArgument("fn") != null
+                    && directive.getArgument("fn").getValue() instanceof StringValue function && function.getValue().equals("countLinks")
+                    && directive.getArgument("args") != null && directive.getArgument("args").getValue() instanceof graphql.language.ObjectValue arguments) {
+                for (var field : arguments.getObjectFields()) {
+                    if (field.getName().equals("type")) {
+                        if (field.getValue() instanceof StringValue type) references.add(type.getValue());
+                        if (field.getValue() instanceof graphql.language.EnumValue type) references.add(type.getName());
+                    }
+                }
+            }
         }
         for (var child : node.getChildren()) collectReferences(child, references);
     }
@@ -140,7 +151,7 @@ public final class OdlParser {
         var parents = ancestors(definition.getImplements(), interfaces);
         var fields = resolveFields(definition.getFieldDefinitions(), parents, interfaces);
         return new org.openfoundry.foundation.spi.schema.ObjectTypeDefinition(definition.getName(), fields, parents,
-                inheritedConstraints(definition, parents, interfaces), resolveLinkFields(definition.getFieldDefinitions(), parents, interfaces));
+                inheritedConstraints(definition, parents, interfaces), resolveLinkFields(definition.getFieldDefinitions(), parents, interfaces), resolveComputedFields(definition.getFieldDefinitions(), parents, interfaces));
     }
 
     private static LinkTypeDefinition parseLink(graphql.language.ObjectTypeDefinition definition, Map<String, InterfaceDefinition> interfaces) {
@@ -148,7 +159,7 @@ public final class OdlParser {
         var parents = ancestors(definition.getImplements(), interfaces);
         return new LinkTypeDefinition(definition.getName(), requiredStringArgument(directive, "from"),
                 requiredStringArgument(directive, "to"), Cardinality.valueOf(requiredEnumArgument(directive, "cardinality")),
-                resolveFields(definition.getFieldDefinitions(), parents, interfaces), parents, inheritedConstraints(definition, parents, interfaces), resolveLinkFields(definition.getFieldDefinitions(), parents, interfaces));
+                resolveFields(definition.getFieldDefinitions(), parents, interfaces), parents, inheritedConstraints(definition, parents, interfaces), resolveLinkFields(definition.getFieldDefinitions(), parents, interfaces), resolveComputedFields(definition.getFieldDefinitions(), parents, interfaces));
     }
 
     private static InterfaceDefinition resolveInterface(String name, Map<String, graphql.language.InterfaceTypeDefinition> source,
@@ -160,7 +171,7 @@ public final class OdlParser {
         for (var parent : definition.getImplements()) resolveInterface(((TypeName) parent).getName(), source, resolved, visiting);
         var parents = ancestors(definition.getImplements(), resolved);
         var result = new InterfaceDefinition(name, resolveFields(definition.getFieldDefinitions(), parents, resolved), parents,
-                inheritedConstraints(definition, parents, resolved), resolveLinkFields(definition.getFieldDefinitions(), parents, resolved));
+                inheritedConstraints(definition, parents, resolved), resolveLinkFields(definition.getFieldDefinitions(), parents, resolved), resolveComputedFields(definition.getFieldDefinitions(), parents, resolved));
         resolved.put(name, result);
         visiting.remove(name);
         return result;
@@ -231,6 +242,47 @@ public final class OdlParser {
                     history, hasDirective(field, "sensitive")));
         }
         return List.copyOf(result.values());
+    }
+
+    private static List<ComputedFieldDefinition> resolveComputedFields(List<FieldDefinition> fields, List<String> parents,
+                                                                       Map<String, InterfaceDefinition> interfaces) {
+        var result = new LinkedHashMap<String, ComputedFieldDefinition>();
+        for (String parent : parents) {
+            for (var field : interfaces.get(parent).computedFields()) mergeComputedField(result, field);
+        }
+        for (var field : fields) {
+            if (!hasDirective(field, "computed")) {
+                if (result.containsKey(field.getName())) throw new SchemaValidationException(List.of("inherited computed field cannot change kind: " + field.getName()));
+                continue;
+            }
+            if (field.getDirectives("computed").size() != 1) throw new SchemaValidationException(List.of("duplicate computed directive: " + field.getName()));
+            for (var directive : field.getDirectives()) {
+                if (!Set.of("computed", "sensitive", "readonly").contains(directive.getName())) {
+                    throw new SchemaValidationException(List.of("unsupported computed field directive: " + directive.getName()));
+                }
+            }
+            var directive = requiredDirective(field, "computed");
+            for (var argument : directive.getArguments()) {
+                if (!Set.of("fn", "args", "cache", "ttl").contains(argument.getName())) throw new SchemaValidationException(List.of("unknown computed argument: " + argument.getName()));
+            }
+            var arguments = new LinkedHashMap<String, Object>();
+            if (directive.getArgument("args") != null) {
+                Object raw = literal(directive.getArgument("args").getValue());
+                if (!(raw instanceof Map<?, ?> values)) throw new SchemaValidationException(List.of("computed args must be an object"));
+                values.forEach((name, value) -> arguments.put((String) name, value));
+            }
+            var cache = directive.getArgument("cache") == null ? ComputedFieldDefinition.Cache.LAZY
+                    : ComputedFieldDefinition.Cache.valueOf(requiredEnumArgument(directive, "cache"));
+            String ttl = directive.getArgument("ttl") == null ? null : requiredStringArgument(directive, "ttl");
+            mergeComputedField(result, new ComputedFieldDefinition(field.getName(), typeName(field.getType()), field.getType() instanceof NonNullType,
+                    requiredStringArgument(directive, "fn"), arguments, cache, ttl, hasDirective(field, "sensitive")));
+        }
+        return List.copyOf(result.values());
+    }
+
+    private static void mergeComputedField(Map<String, ComputedFieldDefinition> fields, ComputedFieldDefinition field) {
+        var inherited = fields.putIfAbsent(field.name(), field);
+        if (inherited != null && !inherited.equals(field)) throw new SchemaValidationException(List.of("conflicting inherited computed field: " + field.name()));
     }
 
     private static void mergeLinkField(Map<String, LinkFieldDefinition> fields, LinkFieldDefinition field) {

@@ -1,0 +1,1 @@
+Unmodified ward.odl from syzygyhack/open-foundry v0.3.0 / 1d7e1aa62208d32ed91d358f4503cf2d95523a7e, domain-packs/nhs-acute/schema. Apache-2.0; license in parent directory. Tests supply supporting Patient/Bed/link definitions and do not claim the full NHS Pack is loaded.
