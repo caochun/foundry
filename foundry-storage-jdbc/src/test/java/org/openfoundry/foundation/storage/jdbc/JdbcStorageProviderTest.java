@@ -41,8 +41,8 @@ class JdbcStorageProviderTest {
         storage = new JdbcStorageProvider(dataSource, DatabaseDialect.h2());
         PropertyDefinition id = new PropertyDefinition("id", "ID", true, true, true, true, false, true);
         storage.applySchema(CONTEXT, new OntologySchema("example", "0.1.0",
-                List.of(new ObjectTypeDefinition("Person", List.of(id)), new ObjectTypeDefinition("Organization", List.of(id))),
-                List.of(new LinkTypeDefinition("BelongsTo", "Person", "Organization", Cardinality.MANY_TO_ONE, List.of(id))),
+                List.of(new ObjectTypeDefinition("Person", List.of(id, new PropertyDefinition("name", "String", false, false, false, false, false, false))), new ObjectTypeDefinition("Organization", List.of(id, new PropertyDefinition("name", "String", false, false, false, false, false, false)))),
+                List.of(new LinkTypeDefinition("BelongsTo", "Person", "Organization", Cardinality.MANY_TO_ONE, List.of(id, new PropertyDefinition("role", "String", false, false, false, false, false, false)))),
                 List.of()));
     }
 

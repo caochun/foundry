@@ -46,7 +46,11 @@ class GovernedBoundaryTest {
 
     private InMemoryStorageProvider storage() {
         var storage = new InMemoryStorageProvider();
-        storage.applySchema(CONTEXT, SCHEMA);
+        var storageFields = new java.util.ArrayList<>(SCHEMA.objectTypes().getFirst().properties());
+        storageFields.add(new org.openfoundry.foundation.spi.schema.PropertyDefinition("unregistered", "String", false, false, false, false, false, false));
+        // Storage can contain a field outside this API's registered projection; reads must still hide it.
+        storage.applySchema(CONTEXT, new OntologySchema(SCHEMA.namespace(), SCHEMA.version(),
+                List.of(new org.openfoundry.foundation.spi.schema.ObjectTypeDefinition("Item", storageFields)), SCHEMA.linkTypes(), SCHEMA.actionTypes()));
         try (var tx = storage.beginTransaction(CONTEXT)) {
             tx.createObject("Item", "a", Map.of("name", "Initial", "secret", "synthetic", "unregistered", "must-not-leak"));
             tx.createObject("Item", "b", Map.of("name", "Other", "secret", "synthetic-other"));

@@ -75,6 +75,22 @@ public final class SchemaCompiler {
             }
         }
 
+        Set<String> allNames = new HashSet<>();
+        for (String name : java.util.stream.Stream.of(objectNames, linkNames, actionNames, schema.enums().keySet()).flatMap(Set::stream).toList()) {
+            if (!allNames.add(name)) issues.add("type name reused across kinds: " + name);
+        }
+        schema.enums().forEach((name, values) -> {
+            if (values.isEmpty() || new HashSet<>(values).size() != values.size()) issues.add("invalid enum: " + name);
+        });
+        var fields = java.util.stream.Stream.concat(schema.objectTypes().stream().flatMap(type -> type.properties().stream()),
+                schema.linkTypes().stream().flatMap(type -> type.properties().stream())).toList();
+        for (var property : fields) {
+            String base = property.type().replace("[", "").replace("]", "").replace("!", "");
+            if (!org.openfoundry.foundation.spi.schema.PropertyValues.SCALARS.contains(base) && !schema.enums().containsKey(base)) {
+                issues.add("unsupported property type: " + property.name() + ": " + property.type());
+            }
+            if (property.primary() && (!property.type().equals("ID") || !property.required())) issues.add("primary property must be ID!: " + property.name());
+        }
         return List.copyOf(issues);
     }
 
@@ -108,6 +124,8 @@ public final class SchemaCompiler {
     private static String canonical(OntologySchema schema) {
         StringBuilder result = new StringBuilder()
                 .append(schema.namespace()).append('|').append(schema.version());
+        schema.enums().entrySet().stream().sorted(Map.Entry.comparingByKey())
+                .forEach(entry -> result.append("|E:").append(entry.getKey()).append(entry.getValue().stream().sorted().toList()));
         schema.objectTypes().stream().sorted(java.util.Comparator.comparing(ObjectTypeDefinition::name))
                 .forEach(type -> result.append("|O:").append(type.name()).append(properties(type.properties())));
         schema.linkTypes().stream().sorted(java.util.Comparator.comparing(LinkTypeDefinition::name))

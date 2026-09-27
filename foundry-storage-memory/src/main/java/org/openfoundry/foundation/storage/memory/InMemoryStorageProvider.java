@@ -14,6 +14,8 @@ import org.openfoundry.foundation.spi.StorageProvider;
 import org.openfoundry.foundation.spi.Transaction;
 import org.openfoundry.foundation.spi.TemporalHistory;
 import java.time.Clock;
+import org.openfoundry.foundation.spi.schema.PropertyValues;
+import org.openfoundry.foundation.spi.schema.UniquePropertyIndex;
 import org.openfoundry.foundation.spi.TraversalResult;
 import org.openfoundry.foundation.spi.TraversalStep;
 import org.openfoundry.foundation.spi.schema.Cardinality;
@@ -58,7 +60,11 @@ public final class InMemoryStorageProvider implements StorageProvider {
     @Override
     public void applySchema(RequestContext context, OntologySchema schema) {
         Objects.requireNonNull(context, "context must not be null");
-        this.schema = Objects.requireNonNull(schema, "schema must not be null");
+        PropertyValues.requireSchema(schema);
+        synchronized (monitor) {
+            if (!Objects.equals(this.schema, schema)) revision++;
+            this.schema = Objects.requireNonNull(schema, "schema must not be null");
+        }
     }
 
     @Override
@@ -81,9 +87,8 @@ public final class InMemoryStorageProvider implements StorageProvider {
                         }).filter(Objects::nonNull).filter(object -> options.includeDeleted() || !object.isDeleted())
                         .sorted(Comparator.comparing(ObjectRecord::id)).toList(), options);
             }
-            return page(state.objects.entrySet().stream()
-                    .filter(entry -> entry.getKey().startsWith(context.tenantId() + "|" + type + "|"))
-                    .map(Map.Entry::getValue)
+            return page(state.objects.values().stream()
+                    .filter(object -> object.tenantId().equals(context.tenantId()) && object.type().equals(type))
                     .filter(object -> options.includeDeleted() || !object.isDeleted())
                     .sorted(Comparator.comparing(ObjectRecord::id))
                     .toList(), options);
@@ -215,15 +220,15 @@ public final class InMemoryStorageProvider implements StorageProvider {
     }
 
     private static String objectKey(RequestContext context, String type, String id) {
-        return context.tenantId() + "|" + type + "|" + id;
+        return context.tenantId().length() + ":" + context.tenantId() + type.length() + ":" + type + (id == null ? "null:" : id.length() + ":" + id);
     }
 
     private static String linkKey(RequestContext context, String type, String id) {
-        return context.tenantId() + "|" + type + "|" + id;
+        return context.tenantId().length() + ":" + context.tenantId() + type.length() + ":" + type + (id == null ? "null:" : id.length() + ":" + id);
     }
 
     private static String historyKey(RequestContext context, EntityKey key) {
-        return context.tenantId() + "|" + key.type() + "|" + key.id();
+        return objectKey(context, key.type(), key.id());
     }
 
     private static EntityKey endpointFrom(HistorySnapshot snapshot) {
@@ -242,6 +247,11 @@ public final class InMemoryStorageProvider implements StorageProvider {
         }
     }
 
+    private List<org.openfoundry.foundation.spi.schema.PropertyDefinition> objectProperties(String type) {
+        requireObjectType(type);
+        return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().properties();
+    }
+
     private LinkTypeDefinition requireLinkType(String type) {
         if (schema == null) {
             throw new IllegalStateException("schema has not been applied");
@@ -258,6 +268,8 @@ public final class InMemoryStorageProvider implements StorageProvider {
         private State working;
         private final String transactionId = UUID.randomUUID().toString();
         private boolean closed;
+        private final UniquePropertyIndex uniqueProperties = new UniquePropertyIndex();
+        private final OntologySchema transactionSchema = schema;
 
         private MemoryTransaction(RequestContext context, long baseRevision, State working) {
             this.context = context;
@@ -283,6 +295,8 @@ public final class InMemoryStorageProvider implements StorageProvider {
             if (working.objects.containsKey(key)) {
                 throw new IllegalStateException("object already exists: " + type + ":" + id);
             }
+            properties = PropertyValues.validate(schema, objectProperties(type), id, properties, null);
+            uniqueProperties.check(schema, "object", type, objectProperties(type), id, properties, () -> currentProperties(false, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             ObjectRecord object = new ObjectRecord(context.tenantId(), type, id, 1,
@@ -290,6 +304,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
             working.objects.put(key, object);
             appendHistory(new EntityKey(type, id), 1, EntityOperation.CREATED,
                     effective, null, now, properties);
+            uniqueProperties.applied(schema, "object", type, objectProperties(type), id, null, properties);
             return object;
         }
 
@@ -308,8 +323,8 @@ public final class InMemoryStorageProvider implements StorageProvider {
             ObjectRecord existing = requireObject(working.objects.get(key), type, id);
             assertVersion(existing.version(), expectedVersion);
             if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
-            Map<String, Object> merged = new HashMap<>(existing.properties());
-            merged.putAll(properties);
+            Map<String, Object> merged = PropertyValues.validate(schema, objectProperties(type), id, properties, existing.properties());
+            uniqueProperties.check(schema, "object", type, objectProperties(type), id, merged, () -> currentProperties(false, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             ObjectRecord updated = new ObjectRecord(context.tenantId(), type, id,
@@ -318,6 +333,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
             working.objects.put(key, updated);
             appendHistory(new EntityKey(type, id), updated.version(), EntityOperation.UPDATED,
                     effective, null, now, merged);
+            uniqueProperties.applied(schema, "object", type, objectProperties(type), id, existing.properties(), merged);
             return updated;
         }
 
@@ -341,6 +357,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
             working.objects.put(key, deleted);
             appendHistory(new EntityKey(type, id), deleted.version(), EntityOperation.DELETED,
                     effective, null, now, existing.properties());
+            uniqueProperties.applied(schema, "object", type, objectProperties(type), id, existing.properties(), null);
         }
 
         @Override
@@ -360,6 +377,8 @@ public final class InMemoryStorageProvider implements StorageProvider {
             if (working.links.containsKey(key)) {
                 throw new IllegalStateException("link already exists: " + type + ":" + id);
             }
+            properties = PropertyValues.validate(schema, requireLinkType(type).properties(), id, properties, null);
+            uniqueProperties.check(schema, "link", type, requireLinkType(type).properties(), id, properties, () -> currentProperties(true, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             if (!definition.fromType().equals(from.type()) || !definition.toType().equals(to.type())) {
@@ -374,6 +393,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
             working.links.put(key, link);
             appendHistory(new EntityKey(type, id), 1, EntityOperation.CREATED,
                     effective, null, now, linkState(link));
+            uniqueProperties.applied(schema, "link", type, requireLinkType(type).properties(), id, null, properties);
             return link;
         }
 
@@ -391,8 +411,8 @@ public final class InMemoryStorageProvider implements StorageProvider {
             LinkRecord existing = requireLink(working.links.get(key), type, id);
             assertVersion(existing.version(), expectedVersion);
             if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
-            Map<String, Object> merged = new HashMap<>(existing.properties());
-            merged.putAll(properties);
+            Map<String, Object> merged = PropertyValues.validate(schema, requireLinkType(type).properties(), id, properties, existing.properties());
+            uniqueProperties.check(schema, "link", type, requireLinkType(type).properties(), id, merged, () -> currentProperties(true, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             LinkRecord updated = new LinkRecord(context.tenantId(), type, id, existing.from(),
@@ -402,6 +422,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
             working.links.put(key, updated);
             appendHistory(new EntityKey(type, id), updated.version(), EntityOperation.UPDATED,
                     effective, null, now, linkState(updated));
+            uniqueProperties.applied(schema, "link", type, requireLinkType(type).properties(), id, existing.properties(), merged);
             return updated;
         }
 
@@ -425,6 +446,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
             working.links.put(key, deleted);
             appendHistory(new EntityKey(type, id), deleted.version(), EntityOperation.DELETED,
                     effective, null, now, linkState(deleted));
+            uniqueProperties.applied(schema, "link", type, requireLinkType(type).properties(), id, existing.properties(), null);
         }
 
         @Override
@@ -500,6 +522,18 @@ public final class InMemoryStorageProvider implements StorageProvider {
             }
         }
 
+        private Map<String, Map<String, Object>> currentProperties(boolean link, String type) {
+            var result = new HashMap<String, Map<String, Object>>();
+            if (link) {
+                working.links.values().stream().filter(record -> record.tenantId().equals(context.tenantId()) && record.type().equals(type) && !record.isDeleted())
+                        .forEach(record -> result.put(record.id(), record.properties()));
+            } else {
+                working.objects.values().stream().filter(record -> record.tenantId().equals(context.tenantId()) && record.type().equals(type) && !record.isDeleted())
+                        .forEach(record -> result.put(record.id(), record.properties()));
+            }
+            return result;
+        }
+
         private void requireHistoricalEndpoint(EntityKey key, Instant effective, Instant recorded) {
             if (!TemporalHistory.active(TemporalHistory.at(working.history.getOrDefault(historyKey(context, key), List.of()), effective, recorded))) {
                 throw new IllegalArgumentException("Link endpoint did not exist at effective time: " + key);
@@ -535,6 +569,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
         }
 
         private void assertOpen() {
+            if (!Objects.equals(transactionSchema, schema)) throw new IllegalStateException("Schema changed during transaction");
             if (closed) {
                 throw new IllegalStateException("transaction is closed");
             }

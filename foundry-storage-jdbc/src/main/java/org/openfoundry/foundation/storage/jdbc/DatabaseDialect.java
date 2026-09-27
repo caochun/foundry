@@ -16,6 +16,9 @@ public interface DatabaseDialect {
         String text = textType();
         String timestamp = timestampType();
         return """
+                CREATE TABLE IF NOT EXISTS of_write_guards (
+                  tenant_id VARCHAR(255) PRIMARY KEY
+                );
                 CREATE TABLE IF NOT EXISTS of_objects (
                   tenant_id VARCHAR(255) NOT NULL,
                   object_type VARCHAR(255) NOT NULL,

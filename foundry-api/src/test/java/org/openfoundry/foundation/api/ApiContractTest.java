@@ -23,7 +23,7 @@ class ApiContractTest {
     void generatesStableGraphqlQueryAndMutationContract() {
         PropertyDefinition id = new PropertyDefinition("id", "ID", true, true, true, true, false, true);
         OntologySchema schema = new OntologySchema("example", "0.1.0",
-                List.of(new ObjectTypeDefinition("Person", List.of(id))), List.of(), List.of());
+                List.of(new ObjectTypeDefinition("Person", List.of(id, new PropertyDefinition("name", "String", false, false, false, false, false, false)))), List.of(), List.of());
         String sdl = new GraphqlContractGenerator().generate(schema);
         assertTrue(sdl.contains("type Person"));
         assertTrue(sdl.contains("person(id: ID!)"));
@@ -33,7 +33,7 @@ class ApiContractTest {
     void executesGeneratedGraphqlQueryThroughApplicationService() {
         PropertyDefinition id = new PropertyDefinition("id", "ID", true, true, true, true, false, true);
         OntologySchema schema = new OntologySchema("example", "0.1.0",
-                List.of(new ObjectTypeDefinition("Person", List.of(id))), List.of(), List.of());
+                List.of(new ObjectTypeDefinition("Person", List.of(id, new PropertyDefinition("name", "String", false, false, false, false, false, false)))), List.of(), List.of());
         var context = RequestContext.system("tenant", "u-1");
         var storage = new InMemoryStorageProvider();
         storage.applySchema(context, schema);

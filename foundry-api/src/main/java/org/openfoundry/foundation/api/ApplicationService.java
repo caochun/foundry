@@ -106,9 +106,11 @@ public final class ApplicationService {
 
     private Object resolve(RequestContext context, String type, Object value) {
         if (value == null) return null;
+        if (type.endsWith("!")) type = type.substring(0, type.length() - 1);
         if (type.startsWith("[") && type.endsWith("]")) {
             if (!(value instanceof List<?> list)) throw new IllegalArgumentException("Expected parameter list");
-            return list.stream().map(item -> resolve(context, type.substring(1, type.length() - 1), item)).toList();
+            String element = type.substring(1, type.length() - 1);
+            return list.stream().map(item -> resolve(context, element, item)).toList();
         }
         if (Set.of("ID", "String", "Int", "Float", "Boolean", "Date", "DateTime", "JSON").contains(type)) return value;
         if (!properties.containsKey(type) || !(value instanceof String id) || id.isBlank()) {

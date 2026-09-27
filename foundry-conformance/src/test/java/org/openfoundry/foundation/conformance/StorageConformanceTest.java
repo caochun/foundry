@@ -38,8 +38,8 @@ class StorageConformanceTest {
     private static final EntityKey ORG = new EntityKey("Organization", "org-1");
     private static final PropertyDefinition ID = new PropertyDefinition("id", "ID", true, true, true, true, false, true);
     private static final OntologySchema SCHEMA = new OntologySchema("conformance", "0.1.0",
-            List.of(new ObjectTypeDefinition("Person", List.of(ID)), new ObjectTypeDefinition("Organization", List.of(ID)),
-                    new ObjectTypeDefinition("Assignment", List.of(ID))),
+            List.of(new ObjectTypeDefinition("Person", List.of(ID, new PropertyDefinition("name", "String", false, false, false, false, false, false))), new ObjectTypeDefinition("Organization", List.of(ID, new PropertyDefinition("name", "String", false, false, false, false, false, false))),
+                    new ObjectTypeDefinition("Assignment", List.of(ID, new PropertyDefinition("title", "String", false, false, false, false, false, false)))),
             List.of(
                     new LinkTypeDefinition("BelongsTo", "Person", "Organization", Cardinality.MANY_TO_ONE, List.of(ID)),
                     new LinkTypeDefinition("HoldsAssignment", "Person", "Assignment", Cardinality.MANY_TO_ONE, List.of(ID)),

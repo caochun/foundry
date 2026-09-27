@@ -10,6 +10,8 @@
 - [ADR-0004](adr/0004-upstream-parity-and-governed-boundary.md)：通用执行治理、字段策略和兼容迁移。
 - [ADR-0005](adr/0005-temporal-transitions-and-legacy-history.md)：时间转换、迟到事实与旧历史隔离；[迁移说明](temporal-migration.md)。
 
+- [ADR-0006](adr/0006-property-validation-and-write-serialization.md)：属性约束、事务唯一性和并发写入；[升级说明](property-validation-migration.md)。
+
 ## 阅读顺序
 
 1. [constitution.md](constitution.md)：不可违背的设计原则和范围边界。

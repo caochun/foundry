@@ -35,7 +35,9 @@ public final class ActionParameterValidator {
     private boolean matches(String type, Object value) {
         if (type.startsWith("[") && type.endsWith("]")) {
             String element = type.substring(1, type.length() - 1);
-            return value instanceof List<?> list && list.stream().allMatch(item -> item != null && matches(element, item));
+            boolean required = element.endsWith("!");
+            String base = required ? element.substring(0, element.length() - 1) : element;
+            return value instanceof List<?> list && list.stream().allMatch(item -> item == null ? !required : matches(base, item));
         }
         return switch (type) {
             case "ID", "String" -> value instanceof String;

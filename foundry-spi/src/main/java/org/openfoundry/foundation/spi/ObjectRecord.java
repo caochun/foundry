@@ -46,7 +46,6 @@ public record ObjectRecord(
     }
 
     private static Map<String, Object> immutableProperties(Map<String, Object> properties) {
-        return Collections.unmodifiableMap(new LinkedHashMap<>(
-                Objects.requireNonNull(properties, "properties must not be null")));
+        return org.openfoundry.foundation.spi.schema.PropertyValues.immutableMap(Objects.requireNonNull(properties, "properties must not be null"));
     }
 }

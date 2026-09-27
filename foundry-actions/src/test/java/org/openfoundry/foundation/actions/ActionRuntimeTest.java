@@ -39,7 +39,7 @@ class ActionRuntimeTest {
         RequestContext context = RequestContext.system("tenant", "operator");
         PropertyDefinition id = new PropertyDefinition("id", "ID", true, true, true, true, false, true);
         storage.applySchema(context, new OntologySchema("example", "0.1.0",
-                List.of(new ObjectTypeDefinition("Person", List.of(id))), List.of(), List.of()));
+                List.of(new ObjectTypeDefinition("Person", List.of(id, new PropertyDefinition("status", "String", true, false, false, false, false, false)))), List.of(), List.of()));
         ObjectRecord person;
         try (var transaction = storage.beginTransaction(context)) {
             person = transaction.createObject("Person", "p-1", Map.of("status", "ACTIVE"));

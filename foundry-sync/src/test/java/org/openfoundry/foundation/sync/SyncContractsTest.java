@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SyncContractsTest {
     @Test
@@ -38,7 +39,8 @@ class SyncContractsTest {
         RequestContext context = RequestContext.system("tenant", "sync");
         storage.applySchema(context, new OntologySchema("example", "0.1.0",
                 List.of(new ObjectTypeDefinition("Person", List.of(
-                        new PropertyDefinition("id", "ID", true, true, true, true, false, true)))),
+                        new PropertyDefinition("id", "ID", true, true, true, true, false, true),
+                        new PropertyDefinition("name", "String", true, false, false, false, false, false)))),
                 List.of(), List.of()));
         Instant now = Instant.now();
         SourceRecord source = new SourceRecord("hr", "p-1", "UPSERT", now,
@@ -53,5 +55,10 @@ class SyncContractsTest {
                 new MappingConfig("Person", "id", Map.of("id", "id", "name", "name")), context);
         assertEquals(1, result.created());
         assertEquals("Alice", storage.getObject(context, "Person", "p-1").properties().get("name"));
+        var replay = new MaterializedSyncService(storage).sync(connector, new SourceQuery("people", Map.of()),
+                new MappingConfig("Person", "id", Map.of("id", "id", "name", "name")), context);
+        assertTrue(replay.failures().isEmpty());
+        assertEquals(0, replay.updated());
+        assertEquals(1, storage.getObject(context, "Person", "p-1").version());
     }
 }

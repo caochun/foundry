@@ -31,7 +31,6 @@ public record HistorySnapshot(
             throw new IllegalArgumentException("validTo must be after validFrom");
         }
         Objects.requireNonNull(recordedAt, "recordedAt must not be null");
-        state = Collections.unmodifiableMap(new LinkedHashMap<>(
-                Objects.requireNonNull(state, "state must not be null")));
+        state = org.openfoundry.foundation.spi.schema.PropertyValues.immutableMap(Objects.requireNonNull(state, "state must not be null"));
     }
 }

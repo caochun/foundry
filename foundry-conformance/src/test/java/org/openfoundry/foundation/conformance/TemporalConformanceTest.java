@@ -30,8 +30,8 @@ class TemporalConformanceTest {
     static final EntityKey ORG = new EntityKey("Organization", "a");
     static final PropertyDefinition ID = new PropertyDefinition("id", "ID", true, true, true, true, false, true);
     static final OntologySchema SCHEMA = new OntologySchema("temporal", "0.1.0",
-            List.of(new ObjectTypeDefinition("Person", List.of(ID)), new ObjectTypeDefinition("Organization", List.of(ID))),
-            List.of(new LinkTypeDefinition("BelongsTo", "Person", "Organization", Cardinality.MANY_TO_ONE, List.of(ID))), List.of());
+            List.of(new ObjectTypeDefinition("Person", List.of(ID, new PropertyDefinition("name", "String", false, false, false, false, false, false))), new ObjectTypeDefinition("Organization", List.of(ID, new PropertyDefinition("name", "String", false, false, false, false, false, false)))),
+            List.of(new LinkTypeDefinition("BelongsTo", "Person", "Organization", Cardinality.MANY_TO_ONE, List.of(ID, new PropertyDefinition("role", "String", false, false, false, false, false, false)))), List.of());
 
     @TestFactory
     Stream<DynamicTest> sameTemporalRulesForBothProviders() {

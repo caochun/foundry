@@ -56,7 +56,14 @@ public final class OdlParser {
             }
         }
 
-        return new OntologySchema(namespace.name(), namespace.version(), objects, links, actions);
+        var enums = new java.util.LinkedHashMap<String, java.util.List<String>>();
+        for (Definition<?> definition : document.getDefinitions()) {
+            if (definition instanceof graphql.language.EnumTypeDefinition enumeration) {
+                var values = enumeration.getEnumValueDefinitions().stream().map(graphql.language.EnumValueDefinition::getName).toList();
+                if (enums.put(enumeration.getName(), values) != null) throw new SchemaValidationException(List.of("duplicate enum: " + enumeration.getName()));
+            }
+        }
+        return new OntologySchema(namespace.name(), namespace.version(), objects, links, actions, enums);
     }
 
     private static org.openfoundry.foundation.spi.schema.ObjectTypeDefinition parseObject(
@@ -149,7 +156,8 @@ public final class OdlParser {
         if (type instanceof NonNullType nonNull) {
             return typeName(nonNull.getType());
         }
-        return "[" + typeName(((graphql.language.ListType) type).getType()) + "]";
+        Type<?> element = ((graphql.language.ListType) type).getType();
+        return "[" + typeName(element) + (element instanceof NonNullType ? "!" : "") + "]";
     }
 
     private record Namespace(String name, String version) {}

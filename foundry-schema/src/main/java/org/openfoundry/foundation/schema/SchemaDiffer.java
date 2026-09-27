@@ -17,6 +17,13 @@ import java.util.Set;
 public final class SchemaDiffer {
     public SchemaDiff diff(OntologySchema previous, OntologySchema next) {
         List<SchemaChange> changes = new ArrayList<>();
+        for (var entry : next.enums().entrySet()) {
+            var old = previous.enums().get(entry.getKey());
+            if (old == null) changes.add(new SchemaChange("enum." + entry.getKey(), "enum added", MigrationClass.SAFE));
+            else if (!new HashSet<>(old).equals(new HashSet<>(entry.getValue()))) changes.add(new SchemaChange("enum." + entry.getKey(), "enum members changed",
+                    entry.getValue().containsAll(old) ? MigrationClass.COMPATIBLE : MigrationClass.BREAKING));
+        }
+        for (String name : previous.enums().keySet()) if (!next.enums().containsKey(name)) changes.add(new SchemaChange("enum." + name, "enum removed", MigrationClass.BREAKING));
         compareObjects(previous, next, changes);
         compareLinks(previous, next, changes);
         compareActions(previous, next, changes);
@@ -89,7 +96,8 @@ public final class SchemaDiffer {
             } else if (!old.equals(current)) {
                 MigrationClass classification = old.type().equals(current.type()) && !old.required() && current.required()
                         ? MigrationClass.BREAKING : MigrationClass.COMPATIBLE;
-                if (old.primary() != current.primary()) classification = MigrationClass.BREAKING;
+                if (!old.type().equals(current.type()) || old.primary() != current.primary()
+                        || !old.unique() && current.unique() || !old.immutable() && current.immutable()) classification = MigrationClass.BREAKING;
                 changes.add(new SchemaChange(owner + "." + name, "property definition changed", classification));
             }
         }

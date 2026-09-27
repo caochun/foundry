@@ -38,6 +38,30 @@ class SchemaRegistryTest {
         assertEquals(2, registry.history().size());
     }
 
+    @Test
+    void propertyTypeAndUniquenessChangesAreBreaking() {
+        var before = schema(List.of(ID, new PropertyDefinition("value", "String", false, false, false, false, false, false)));
+        var numeric = schema(List.of(ID, new PropertyDefinition("value", "Int", false, false, false, false, false, false)));
+        var unique = schema(List.of(ID, new PropertyDefinition("value", "String", false, false, true, false, false, false)));
+        assertEquals(MigrationClass.BREAKING, new SchemaDiffer().diff(before, numeric).classification());
+        assertEquals(MigrationClass.BREAKING, new SchemaDiffer().diff(before, unique).classification());
+    }
+
+    @Test
+    void enumMembersAreRetainedAndNarrowingRequiresMigration() {
+        String source = """
+                extend schema @namespace(name: "enums", version: "0.1.0")
+                enum Status { ACTIVE INACTIVE }
+                type Item @objectType { id: ID! @primary state: Status! labels: [String!] }
+                """;
+        var before = new OdlParser().parse(source);
+        assertEquals(List.of("ACTIVE", "INACTIVE"), before.enums().get("Status"));
+        assertEquals("[String!]", before.objectTypes().getFirst().properties().get(2).type());
+        var narrowed = new OdlParser().parse(source.replace("ACTIVE INACTIVE", "ACTIVE"));
+        assertEquals(MigrationClass.BREAKING, new SchemaDiffer().diff(before, narrowed).classification());
+        org.junit.jupiter.api.Assertions.assertNotEquals(new SchemaCompiler().compile(before).schemaDigest(), new SchemaCompiler().compile(narrowed).schemaDigest());
+    }
+
     private static OntologySchema schema(List<PropertyDefinition> properties) {
         return new OntologySchema("example", "0.1.0", List.of(new ObjectTypeDefinition("Person", properties)), List.of(), List.of());
     }

@@ -27,19 +27,31 @@ public final class MaterializedSyncService {
                 MappedRecord mapped = mapper.map(source);
                 ObjectRecord existing = storage.getObject(context, mapped.key().type(), mapped.key().id());
                 try (Transaction transaction = storage.beginTransaction(context)) {
+                    String applied = "NONE";
                     if ("DELETE".equalsIgnoreCase(mapped.operation())) {
                         if (existing != null && !existing.isDeleted()) {
                             transaction.deleteObject(existing.type(), existing.id(), existing.version());
-                            counts.deleted++;
+                            applied = "DELETED";
                         }
                     } else if (existing == null) {
                         transaction.createObject(mapped.key().type(), mapped.key().id(), mapped.properties());
-                        counts.created++;
+                        applied = "CREATED";
                     } else {
-                        transaction.updateObject(existing.type(), existing.id(), mapped.properties(), existing.version());
-                        counts.updated++;
+                        var patch = new java.util.LinkedHashMap<>(mapped.properties());
+                        patch.entrySet().removeIf(entry -> existing.properties().containsKey(entry.getKey())
+                                && java.util.Objects.equals(existing.properties().get(entry.getKey()), entry.getValue()));
+                        if (!patch.isEmpty()) {
+                            transaction.updateObject(existing.type(), existing.id(), patch, existing.version());
+                            applied = "UPDATED";
+                        }
                     }
                     transaction.commit();
+                    switch (applied) {
+                        case "CREATED" -> counts.created++;
+                        case "UPDATED" -> counts.updated++;
+                        case "DELETED" -> counts.deleted++;
+                        default -> { }
+                    }
                 }
             } catch (RuntimeException exception) {
                 failures.add(new SyncFailure(source.sourceSystem(), source.sourceRecordId(), exception.getMessage()));

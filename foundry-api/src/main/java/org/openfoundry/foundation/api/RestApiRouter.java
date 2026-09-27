@@ -40,6 +40,8 @@ public final class RestApiRouter {
             return ApiResponse.ok(application.execute(manifest, context, principal, parameters, idempotencyKey));
         } catch (SecurityException denied) {
             return ApiResponse.forbidden();
+        } catch (org.openfoundry.foundation.spi.schema.PropertyValidationException invalid) {
+            return new ApiResponse(400, Map.of("error", "Property validation failed", "code", invalid.code(), "field", invalid.field()));
         } catch (IllegalArgumentException invalid) {
             return ApiResponse.badRequest("Invalid Action request");
         }

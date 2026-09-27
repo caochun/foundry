@@ -38,8 +38,7 @@ public record LinkRecord(
         if (validTo != null && validTo.isBefore(validFrom)) {
             throw new IllegalArgumentException("validTo must not be before validFrom");
         }
-        properties = Collections.unmodifiableMap(new LinkedHashMap<>(
-                Objects.requireNonNull(properties, "properties must not be null")));
+        properties = org.openfoundry.foundation.spi.schema.PropertyValues.immutableMap(Objects.requireNonNull(properties, "properties must not be null"));
     }
 
     public boolean isDeleted() {

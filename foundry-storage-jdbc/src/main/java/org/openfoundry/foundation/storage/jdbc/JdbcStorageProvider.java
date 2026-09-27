@@ -17,6 +17,8 @@ import org.openfoundry.foundation.spi.StorageProvider;
 import org.openfoundry.foundation.spi.Transaction;
 import org.openfoundry.foundation.spi.TemporalHistory;
 import java.time.Clock;
+import org.openfoundry.foundation.spi.schema.PropertyValues;
+import org.openfoundry.foundation.spi.schema.UniquePropertyIndex;
 import org.openfoundry.foundation.spi.TraversalResult;
 import org.openfoundry.foundation.spi.TraversalStep;
 import org.openfoundry.foundation.spi.schema.Cardinality;
@@ -69,6 +71,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
     public void applySchema(RequestContext context, OntologySchema schema) {
         Objects.requireNonNull(context, "context must not be null");
         Objects.requireNonNull(schema, "schema must not be null");
+        PropertyValues.requireSchema(schema);
         synchronized (schemaLock) {
             try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
                 for (String ddl : dialect.currentTablesDdl().split(";\\s*")) {
@@ -276,12 +279,33 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
     @Override
     public Transaction beginTransaction(RequestContext context) {
+        initializeWriteGuard(context);
         try {
             Connection connection = dataSource.getConnection();
             connection.setAutoCommit(false);
             return new JdbcTransaction(context, connection);
         } catch (SQLException exception) {
             throw sqlError("begin transaction", exception);
+        }
+    }
+
+    private void initializeWriteGuard(RequestContext context) {
+        try (Connection initialization = dataSource.getConnection()) {
+            initialization.setAutoCommit(true);
+            try (var exists = initialization.prepareStatement("SELECT tenant_id FROM of_write_guards WHERE tenant_id = ?")) {
+                exists.setString(1, context.tenantId());
+                try (var row = exists.executeQuery()) {
+                    if (row.next()) return;
+                }
+            }
+            try (var insert = initialization.prepareStatement("INSERT INTO of_write_guards (tenant_id) VALUES (?)")) {
+                insert.setString(1, context.tenantId());
+                insert.executeUpdate();
+            } catch (SQLException duplicate) {
+                if (!"23505".equals(duplicate.getSQLState())) throw duplicate;
+            }
+        } catch (SQLException failure) {
+            throw sqlError("initialize tenant write guard", failure);
         }
     }
 
@@ -453,6 +477,11 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         }
     }
 
+    private List<org.openfoundry.foundation.spi.schema.PropertyDefinition> objectProperties(String type) {
+        requireObjectType(type);
+        return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().properties();
+    }
+
     private LinkTypeDefinition requireLinkType(String type) {
         if (schema == null) throw new IllegalStateException("schema has not been applied");
         return schema.linkTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst()
@@ -473,6 +502,10 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         private final Connection connection;
         private final String transactionId = UUID.randomUUID().toString();
         private boolean closed;
+        private boolean writeLocked;
+        private boolean rollbackOnly;
+        private final OntologySchema transactionSchema = schema;
+        private final UniquePropertyIndex uniqueProperties = new UniquePropertyIndex();
 
         private JdbcTransaction(RequestContext context, Connection connection) {
             this.context = context;
@@ -492,8 +525,11 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         @Override
         public ObjectRecord createObject(String type, String id, Map<String, Object> properties, Instant effectiveAt) {
             assertOpen();
+            lockWrites();
             requireObjectType(type);
             if (findObject(type, id) != null) throw new IllegalStateException("object already exists: " + type + ":" + id);
+            properties = PropertyValues.validate(schema, objectProperties(type), id, properties, null);
+            uniqueProperties.check(schema, "object", type, objectProperties(type), id, properties, () -> currentProperties(false, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             Instant effective = effectiveTime(false, type, id, effectiveAt, now);
             String sql = "INSERT INTO of_objects (tenant_id, object_type, object_id, version, created_at, updated_at, "
@@ -503,6 +539,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setTimestamp(4, timestamp(now)); statement.setTimestamp(5, timestamp(now));
                 statement.setString(6, transactionId); statement.setString(7, json(properties)); statement.executeUpdate();
                 insertObjectHistory(type, id, 1, EntityOperation.CREATED, effective, null, now, properties);
+                uniqueProperties.applied(schema, "object", type, objectProperties(type), id, null, properties);
                 return findObject(type, id);
             } catch (SQLException exception) { throw sqlError("create object", exception); }
         }
@@ -515,10 +552,12 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         @Override
         public ObjectRecord updateObject(String type, String id, Map<String, Object> properties, long expectedVersion, Instant effectiveAt) {
             assertOpen();
+            lockWrites();
             ObjectRecord existing = requireObject(findObject(type, id), type, id);
             assertVersion(existing.version(), expectedVersion);
             if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
-            Map<String, Object> merged = new HashMap<>(existing.properties()); merged.putAll(properties);
+            Map<String, Object> merged = PropertyValues.validate(schema, objectProperties(type), id, properties, existing.properties());
+            uniqueProperties.check(schema, "object", type, objectProperties(type), id, merged, () -> currentProperties(false, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             Instant effective = effectiveTime(false, type, id, effectiveAt, now);
             long version = existing.version() + 1;
@@ -530,6 +569,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setString(7, id); statement.setLong(8, expectedVersion);
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during object update");
                 insertObjectHistory(type, id, version, EntityOperation.UPDATED, effective, null, now, merged);
+                uniqueProperties.applied(schema, "object", type, objectProperties(type), id, existing.properties(), merged);
                 return findObject(type, id);
             } catch (SQLException exception) { throw sqlError("update object", exception); }
         }
@@ -542,6 +582,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         @Override
         public void deleteObject(String type, String id, long expectedVersion, Instant effectiveAt) {
             assertOpen();
+            lockWrites();
             ObjectRecord existing = requireObject(findObject(type, id), type, id);
             assertVersion(existing.version(), expectedVersion);
             if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
@@ -556,6 +597,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setString(7, id); statement.setLong(8, expectedVersion);
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during object delete");
                 insertObjectHistory(type, id, version, EntityOperation.DELETED, effective, null, now, existing.properties());
+                uniqueProperties.applied(schema, "object", type, objectProperties(type), id, existing.properties(), null);
             } catch (SQLException exception) { throw sqlError("delete object", exception); }
         }
 
@@ -566,10 +608,14 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
         @Override
         public LinkRecord createLink(String type, String id, EntityKey from, EntityKey to, Map<String, Object> properties, Instant effectiveAt) {
-            assertOpen(); LinkTypeDefinition definition = requireLinkType(type);
+            assertOpen();
+            lockWrites();
+            LinkTypeDefinition definition = requireLinkType(type);
             requireActiveObject(from); requireActiveObject(to);
             if (findLink(type, id) != null) throw new IllegalStateException("link already exists: " + type + ":" + id);
             enforceCardinality(definition, from, to);
+            properties = PropertyValues.validate(schema, requireLinkType(type).properties(), id, properties, null);
+            uniqueProperties.check(schema, "link", type, requireLinkType(type).properties(), id, properties, () -> currentProperties(true, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             Instant effective = effectiveTime(true, type, id, effectiveAt, now);
             if (effectiveAt != null) {
@@ -586,6 +632,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setTimestamp(8, timestamp(now)); statement.setTimestamp(9, timestamp(now)); statement.setTimestamp(10, timestamp(effective));
                 statement.setString(11, transactionId); statement.setString(12, json(properties)); statement.executeUpdate();
                 insertLinkHistory(type, id, from, to, 1, EntityOperation.CREATED, effective, null, now, properties);
+                uniqueProperties.applied(schema, "link", type, requireLinkType(type).properties(), id, null, properties);
                 return findLink(type, id);
             } catch (SQLException exception) { throw sqlError("create link", exception); }
         }
@@ -597,10 +644,13 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
         @Override
         public LinkRecord updateLink(String type, String id, Map<String, Object> properties, long expectedVersion, Instant effectiveAt) {
-            assertOpen(); LinkRecord existing = requireLink(findLink(type, id), type, id);
+            assertOpen();
+            lockWrites();
+            LinkRecord existing = requireLink(findLink(type, id), type, id);
             assertVersion(existing.version(), expectedVersion);
             if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
-            Map<String, Object> merged = new HashMap<>(existing.properties()); merged.putAll(properties);
+            Map<String, Object> merged = PropertyValues.validate(schema, requireLinkType(type).properties(), id, properties, existing.properties());
+            uniqueProperties.check(schema, "link", type, requireLinkType(type).properties(), id, merged, () -> currentProperties(true, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             Instant effective = effectiveTime(true, type, id, effectiveAt, now);
             long version = existing.version() + 1;
@@ -612,6 +662,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during link update");
                 insertLinkHistory(type, id, existing.from(), existing.to(), version, EntityOperation.UPDATED,
                         effective, null, now, merged);
+                uniqueProperties.applied(schema, "link", type, requireLinkType(type).properties(), id, existing.properties(), merged);
                 return findLink(type, id);
             } catch (SQLException exception) { throw sqlError("update link", exception); }
         }
@@ -623,7 +674,9 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
         @Override
         public void deleteLink(String type, String id, long expectedVersion, Instant effectiveAt) {
-            assertOpen(); LinkRecord existing = requireLink(findLink(type, id), type, id);
+            assertOpen();
+            lockWrites();
+            LinkRecord existing = requireLink(findLink(type, id), type, id);
             assertVersion(existing.version(), expectedVersion);
             if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted"); Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             Instant effective = effectiveTime(true, type, id, effectiveAt, now);
@@ -636,6 +689,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during link delete");
                 insertLinkHistory(type, id, existing.from(), existing.to(), version, EntityOperation.DELETED,
                         effective, null, now, existing.properties());
+                uniqueProperties.applied(schema, "link", type, requireLinkType(type).properties(), id, existing.properties(), null);
             } catch (SQLException exception) { throw sqlError("delete link", exception); }
         }
 
@@ -667,6 +721,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         @Override
         public void commit() {
             assertOpen();
+            if (!Objects.equals(transactionSchema, schema)) throw new IllegalStateException("Schema changed during transaction");
             try { connection.commit(); closed = true; connection.close(); }
             catch (SQLException exception) { throw sqlError("commit transaction", exception); }
         }
@@ -693,6 +748,33 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setString(1, context.tenantId()); statement.setString(2, type); statement.setString(3, id);
                 try (ResultSet result = statement.executeQuery()) { return result.next() ? readLink(result) : null; }
             } catch (SQLException exception) { throw sqlError("read transactional link", exception); }
+        }
+
+        private void lockWrites() {
+            if (!Objects.equals(transactionSchema, schema)) throw new IllegalStateException("Schema changed during transaction");
+            if (writeLocked) return;
+            try (var statement = connection.prepareStatement("SELECT tenant_id FROM of_write_guards WHERE tenant_id = ? FOR UPDATE")) {
+                statement.setString(1, context.tenantId());
+                try (var row = statement.executeQuery()) {
+                    if (!row.next()) throw new IllegalStateException("Tenant write guard missing");
+                }
+                writeLocked = true;
+            } catch (SQLException failure) { throw sqlError("lock tenant writes", failure); }
+        }
+
+        private Map<String, Map<String, Object>> currentProperties(boolean link, String type) {
+            String prefix = link ? "link" : "object";
+            String sql = "SELECT " + prefix + "_id, properties_json FROM of_" + (link ? "links" : "objects")
+                    + " WHERE tenant_id = ? AND " + prefix + "_type = ? AND deleted_at IS NULL";
+            try (var statement = connection.prepareStatement(sql)) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, type);
+                try (var rows = statement.executeQuery()) {
+                    var values = new HashMap<String, Map<String, Object>>();
+                    while (rows.next()) values.put(rows.getString(1), jsonMap(rows.getString(2)));
+                    return values;
+                }
+            } catch (SQLException failure) { throw sqlError("read unique property scope", failure); }
         }
 
         private Instant effectiveTime(boolean link, String type, String id, Instant requested, Instant recorded) {
@@ -790,7 +872,15 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
             if (value == null) statement.setTimestamp(index, null); else statement.setTimestamp(index, timestamp(value));
         }
 
-        private void assertOpen() { if (closed) throw new IllegalStateException("transaction is closed"); }
+        private RuntimeException sqlError(String operation, SQLException failure) {
+            rollbackOnly = true;
+            return JdbcStorageProvider.this.sqlError(operation, failure);
+        }
+
+        private void assertOpen() {
+            if (closed) throw new IllegalStateException("transaction is closed");
+            if (rollbackOnly) throw new IllegalStateException("transaction requires rollback after a database failure");
+        }
     }
 
     private static ObjectRecord requireObject(ObjectRecord object, String type, String id) {
