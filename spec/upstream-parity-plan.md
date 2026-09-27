@@ -11,8 +11,9 @@
 - [x] JDBC命令回执与业务同事务，H2文件恢复/跨Provider及两个独立JVM并发/提交前后强制退出验证；真实目标库仍单独验收。
 - [ ] 读/写拒绝及敏感查看审计、字段隐藏元数据、授权后分页和执行快照的完整一致性验收。
 - [x] OpenFGA Check路径/模型参数和租户编码修正，HTTP stub验证请求协议及失败拒绝。
-- [ ] Action权限目标映射与Pack模型兼容：当前API向所有引用查询同一can_*关系，但上游Library的Member没有can_borrow/can_return；须明确主目标、参与者、关系与新建实体的权限语义。
-- [ ] 真实OpenFGA/OIDC联调、模型及授权管理；不以stub代替集成验收。
+- [x] 显式ONTOLOGY_TARGETS模式：首个对象参数的动作关系、参与者viewer、额外已有目标editor、关系端点及服务器创建证据；旧严格模式保留。
+- [x] 原Library模型与真实OpenFGA 1.21.0 HTTP服务集成：模型门禁、借还、撤权、重放与租户隔离（memory/H2）。
+- [ ] OIDC端到端、生产服务认证、权限资产/字段关系策略自动装配及元组生命周期管理；实际目标库和部署仍需验收。
 
 ## F2：事实完整性与时间
 
@@ -106,3 +107,11 @@ GraphQL与REST共用关系读取：同时检查源/边/目标权限，应用字�
 原始core/library定义及BorrowBook/ReturnBook在memory和H2单连接池通过借还、事件数据解析、幂等及默认三次失败后的补偿。HTTP处理器通过本地服务验证允许端点、稳定请求键、2xx和重定向边界；HTTP续执行重新校验当前权限和主体。旧默认及显式失败策略manifest的指纹值对照6e2e400实现核验，旧无副作用回执格式1保持兼容，新增格式2关联持久执行记录。
 
 独立审计探针也已运行原始借还并验证仅一次事件、同键同结果和还书后无活动借阅关系。测试的授权及种子初始化受控，未替代Pack权限资产自动装配、权限目标映射和真实OpenFGA/国产库验收；明确的Library Member关系命名差异已加入F1。完整ODL/Pack组合、查询、注册表、同步及运维等仍未完成，完整目标保持active。见ADR-0012。
+
+## F1本体权限目标与真实OpenFGA验证记录
+
+2026-09-28：常规根reactor378项，其中Foundry268项，全部通过，无失败/错误/跳过。新增17项普通测试，覆盖声明顺序/集合主目标、参与者可见性、额外编辑权限、创建证据、旧/坏回执处理、类型别名冲突和严格布尔结果。旧STRICT_RESOURCES回归保留。
+
+另外显式启用openfga-integration profile的9项集成测试全部通过。服务为官方OpenFGA 1.21.0 Darwin arm64、隔离loopback内存实例；原Library DSL经官方syntax-transformer 0.2.2转换，模型不补造Member.can_*或LinkType权限。测试memory/H2（单连接池）借还、关系读取和历史、主目标/参与者撤权、删除重放、同本地ID跨租户隔离以及真实服务模型启动门禁。测试store已清空，临时服务已关闭。
+
+独立探针的Library流程改为仅允许原模型声明的关系，并选择ONTOLOGY_TARGETS，原有修复保持通过。实际OIDC/服务认证、权限资产与字段关系策略自动装配、元组生命周期、目标数据库及其余核心模块仍未完成，完整目标保持active。配置和迁移边界见ADR-0013及openfga-integration.md。

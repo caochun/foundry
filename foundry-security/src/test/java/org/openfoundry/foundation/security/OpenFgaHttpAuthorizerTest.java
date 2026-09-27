@@ -43,6 +43,41 @@ class OpenFgaHttpAuthorizerTest {
     }
 
     @Test
+    void explicitTypeAliasesMatchOntologyModelsAndMalformedBooleanDoesNotGrantAccess() throws Exception {
+        var responseBody = new AtomicReference<>("{\"allowed\":\"true\"}");
+        var requestBody = new AtomicReference<String>();
+        var calls = new java.util.concurrent.atomic.AtomicInteger();
+        var server = HttpServer.create(new InetSocketAddress(0), 0);
+        server.createContext("/stores/store/check", exchange -> {
+            calls.incrementAndGet();
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes()));
+            byte[] body = responseBody.get().getBytes();
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+        server.start();
+        try {
+            var endpoint = java.net.URI.create("http://localhost:" + server.getAddress().getPort());
+            var aliases = java.util.Map.of("PersonRecord", "person_record");
+            var client = new OpenFgaHttpAuthorizer(endpoint, "store", "model", aliases);
+            var actor = new SecurityPrincipal("actor", "tenant", Set.of());
+            var key = new EntityKey("PersonRecord", "id");
+            assertFalse(client.check(actor, "viewer", key));
+            responseBody.set("{\"allowed\":true}");
+            assertTrue(client.check(actor, "viewer", key));
+            var body = new ObjectMapper().readTree(requestBody.get());
+            assertEquals("HIGHER_CONSISTENCY", body.path("consistency").asText());
+            assertEquals(OpenFgaResourceIds.resource("tenant", key, aliases), body.path("tuple_key").path("object").asText());
+            assertTrue(body.path("tuple_key").path("object").asText().startsWith("person_record:"));
+            assertFalse(client.check(actor, "viewer", new EntityKey("Unregistered", "id")));
+            assertEquals(2, calls.get());
+            assertThrows(IllegalArgumentException.class, () -> new OpenFgaHttpAuthorizer(endpoint, "store", "model",
+                    java.util.Map.of("Person", "record", "Organization", "record")));
+        } finally { server.stop(0); }
+    }
+
+    @Test
     void malformedAndFailedChecksNeverGrantAccess() throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
         server.createContext("/stores/store/check", exchange -> {

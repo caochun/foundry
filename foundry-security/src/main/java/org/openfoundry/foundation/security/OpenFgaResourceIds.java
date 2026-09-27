@@ -18,6 +18,12 @@ public final class OpenFgaResourceIds {
         return key.type() + ":" + localId(tenantId, key.id());
     }
 
+    public static String resource(String tenantId, EntityKey key, java.util.Map<String, String> typeNames) {
+        String type = typeNames.get(key.type());
+        if (type == null) throw new IllegalArgumentException("OpenFGA resource type is not registered");
+        return resource(tenantId, new EntityKey(type, key.id()));
+    }
+
     private static String localId(String tenantId, String id) {
         if (tenantId == null || tenantId.isBlank() || id == null || id.isBlank()) throw new IllegalArgumentException("Missing resource identity");
         var encoder = Base64.getUrlEncoder().withoutPadding();

@@ -61,9 +61,11 @@ class ActionIdempotencyTest {
         });
         var storage = new InMemoryStorageProvider();
         executor.execute(manifest, definition, context, actor, Map.of(), "key", storage);
+        int initialChecks = checks.get();
         allowed.set(false);
         assertThrows(SecurityException.class, () -> executor.execute(manifest, definition, context, actor, Map.of(), "key", storage));
-        assertEquals(3, checks.get(), "Initial execution rechecks inside the transaction; replay is rejected before lookup");
+        assertTrue(initialChecks >= 2, "Initial execution rechecks inside the transaction");
+        assertEquals(initialChecks + 1, checks.get(), "Revoked replay is rejected before receipt lookup");
         assertEquals(1, storage.auditEntries(context).size());
     }
 

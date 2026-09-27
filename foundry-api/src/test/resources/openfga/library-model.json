@@ -1,0 +1,178 @@
+{
+  "schema_version": "1.1",
+  "type_definitions": [
+    {
+      "type": "user",
+      "relations": {},
+      "metadata": null
+    },
+    {
+      "type": "book",
+      "relations": {
+        "librarian": {
+          "this": {}
+        },
+        "admin": {
+          "this": {}
+        },
+        "viewer": {
+          "union": {
+            "child": [
+              {
+                "this": {}
+              },
+              {
+                "computedUserset": {
+                  "relation": "librarian"
+                }
+              },
+              {
+                "computedUserset": {
+                  "relation": "admin"
+                }
+              }
+            ]
+          }
+        },
+        "editor": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "librarian"
+                }
+              },
+              {
+                "computedUserset": {
+                  "relation": "admin"
+                }
+              }
+            ]
+          }
+        },
+        "can_borrow": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "librarian"
+                }
+              },
+              {
+                "computedUserset": {
+                  "relation": "admin"
+                }
+              }
+            ]
+          }
+        },
+        "can_return": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "librarian"
+                }
+              },
+              {
+                "computedUserset": {
+                  "relation": "admin"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "metadata": {
+        "relations": {
+          "librarian": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "admin": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "viewer": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "editor": {
+            "directly_related_user_types": []
+          },
+          "can_borrow": {
+            "directly_related_user_types": []
+          },
+          "can_return": {
+            "directly_related_user_types": []
+          }
+        }
+      }
+    },
+    {
+      "type": "member",
+      "relations": {
+        "librarian": {
+          "this": {}
+        },
+        "admin": {
+          "this": {}
+        },
+        "viewer": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "librarian"
+                }
+              },
+              {
+                "computedUserset": {
+                  "relation": "admin"
+                }
+              }
+            ]
+          }
+        },
+        "editor": {
+          "computedUserset": {
+            "relation": "admin"
+          }
+        }
+      },
+      "metadata": {
+        "relations": {
+          "librarian": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "admin": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          },
+          "viewer": {
+            "directly_related_user_types": []
+          },
+          "editor": {
+            "directly_related_user_types": []
+          }
+        }
+      }
+    }
+  ]
+}

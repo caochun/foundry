@@ -185,7 +185,7 @@ final class SideEffectRuntime {
         }
         var parameters = ActionContinuationState.parameters(run.state(), transaction);
         if (!authorizer.allowed(context, actor, definition, parameters, transaction)
-                || !authorizer.allowedChanges(context, actor, definition, parameters, ActionContinuationState.affected(run.state()), transaction)) {
+                || !authorizer.allowedReplay(context, actor, definition, parameters, ActionEffectAccess.decode(run.state().get("journal")), transaction)) {
             throw new SecurityException("Continuation denied");
         }
     }

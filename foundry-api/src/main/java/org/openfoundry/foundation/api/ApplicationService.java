@@ -30,6 +30,8 @@ public final class ApplicationService {
     private final Map<String, FieldPolicy> fieldPolicies;
     private final Map<String, Map<String, LinkFieldDefinition>> linkFields;
     private final Set<String> relationTypes;
+    private final Set<String> objectTypes;
+    private final AuthorizationMode authorizationMode;
 
     /** Legacy construction is metadata-only and cannot execute Actions without trusted registration. */
     public ApplicationService(StorageProvider storage, AuthorizationService authorization, ActionExecutor actions) {
@@ -38,6 +40,19 @@ public final class ApplicationService {
 
     public ApplicationService(StorageProvider storage, AuthorizationService authorization, ActionExecutor actions,
                               OntologySchema schema, Map<String, ActionManifest> manifests, Map<String, FieldPolicy> fieldPolicies) {
+        this(storage, authorization, actions, schema, manifests, fieldPolicies, AuthorizationMode.STRICT_RESOURCES);
+    }
+
+    public ApplicationService(StorageProvider storage, AuthorizationService authorization, ActionExecutor actions,
+                              OntologySchema schema, Map<String, ActionManifest> manifests, Map<String, FieldPolicy> fieldPolicies,
+                              AuthorizationMode authorizationMode) {
+        this.authorizationMode = Objects.requireNonNull(authorizationMode);
+        if (authorizationMode == AuthorizationMode.ONTOLOGY_TARGETS && schema == null) throw new IllegalArgumentException("Ontology authorization requires a schema");
+        this.objectTypes = schema == null ? Set.of() : schema.objectTypes().stream()
+                .map(org.openfoundry.foundation.spi.schema.ObjectTypeDefinition::name).collect(Collectors.toUnmodifiableSet());
+        if (authorizationMode == AuthorizationMode.ONTOLOGY_TARGETS && objectTypes.contains("ActionType")) {
+            throw new IllegalArgumentException("ActionType is reserved for object-less action authorization");
+        }
         this.storage = Objects.requireNonNull(storage);
         this.authorization = Objects.requireNonNull(authorization);
         this.actions = Objects.requireNonNull(actions);
@@ -85,7 +100,7 @@ public final class ApplicationService {
 
     public List<HistorySnapshot> history(RequestContext context, SecurityPrincipal principal, EntityKey key) {
         requireContext(context, principal);
-        if (!authorization.check(context, principal, "viewer", key)) return List.of();
+        if (!canViewEntity(context, principal, key)) return List.of();
         return storage.getEntityHistory(context, key).stream().map(history -> new HistorySnapshot(history.key(), history.version(),
                 history.operation(), history.validFrom(), history.validTo(), history.recordedAt(), history.transactionId(),
                 history.actionId(), history.actorId(), history.sourceSystem(), visible(principal, key.type(), history.state()))).toList();
@@ -130,7 +145,8 @@ public final class ApplicationService {
 
     private Object visibleLinkedValue(RequestContext context, SecurityPrincipal principal,
                                       LinkFieldDefinition field, LinkRecord link) {
-        if (!authorization.check(context, principal, "viewer", new EntityKey(link.type(), link.id()))) return null;
+        if (authorizationMode == AuthorizationMode.STRICT_RESOURCES
+                && !authorization.check(context, principal, "viewer", new EntityKey(link.type(), link.id()))) return null;
         EntityKey target = field.direction() == StorageProvider.Direction.OUTBOUND ? link.to() : link.from();
         if (!authorization.check(context, principal, "viewer", target)) return null;
         var object = storage.getObject(context, target.type(), target.id());
@@ -162,7 +178,9 @@ public final class ApplicationService {
         if (registered == null || !registered.equals(manifest)) throw new SecurityException("Unregistered or altered Action manifest");
         ActionTypeDefinition definition = definitions.get(registered.action());
         // Check type-level permission before resolving IDs, then check every resolved object again before replay/write.
-        if (!authorization.check(context, principal, definition.permission(), new EntityKey("ActionType", definition.name()))) {
+        if (authorizationMode == AuthorizationMode.ONTOLOGY_TARGETS
+                ? !ontologyPolicy(principal).primaryAllowed(context, definition, parameters)
+                : !authorization.check(context, principal, definition.permission(), new EntityKey("ActionType", definition.name()))) {
             throw new SecurityException("Action denied");
         }
         Set<String> declared = definition.parameters().stream().map(parameter -> parameter.name()).collect(Collectors.toSet());
@@ -180,13 +198,28 @@ public final class ApplicationService {
         requireContext(context, principal);
         var manifest = manifests.get(actionName);
         var definition = definitions.get(actionName);
-        if (manifest == null || definition == null || !authorization.check(context, principal, definition.permission(),
+        if (manifest == null || definition == null) throw new SecurityException("Action continuation denied");
+        if (authorizationMode == AuthorizationMode.STRICT_RESOURCES && !authorization.check(context, principal, definition.permission(),
                 new EntityKey("ActionType", definition.name()))) throw new SecurityException("Action continuation denied");
         return actions.withAuthorization(actionPolicy(principal)).resume(manifest, definition, actionId, context,
                 new ActionActor(principal.id(), principal.roles()), storage);
     }
 
+    private OntologyActionAuthorizer ontologyPolicy(SecurityPrincipal principal) {
+        return new OntologyActionAuthorizer(authorization, principal, objectTypes, relationTypes);
+    }
+
+    private boolean canViewEntity(RequestContext context, SecurityPrincipal principal, EntityKey key) {
+        if (authorizationMode == AuthorizationMode.ONTOLOGY_TARGETS && relationTypes.contains(key.type())) {
+            var link = storage.getLink(context, key.type(), key.id());
+            return link != null && authorization.check(context, principal, "viewer", link.from())
+                    && authorization.check(context, principal, "viewer", link.to());
+        }
+        return authorization.check(context, principal, "viewer", key);
+    }
+
     private ActionAuthorizer actionPolicy(SecurityPrincipal principal) {
+        if (authorizationMode == AuthorizationMode.ONTOLOGY_TARGETS) return ontologyPolicy(principal);
         return new ActionAuthorizer() {
             @Override
             public boolean allowed(RequestContext ctx, ActionActor actor, ActionTypeDefinition type, Map<String, Object> values) {

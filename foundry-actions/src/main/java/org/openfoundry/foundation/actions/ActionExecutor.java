@@ -154,22 +154,28 @@ public final class ActionExecutor {
                         throw new IllegalArgumentException("Idempotency key belongs to a different request or configuration");
                     }
                     Object format = receipt.result().get("format");
+                    List<ActionEffectAccess> access = null;
                     if ((format instanceof Integer || format instanceof Long) && ((Number) format).longValue() == 2) {
                         var execution = transaction.getActionExecution((String) receipt.result().get("actionId"));
                         if (execution == null) throw new IllegalStateException("Committed continuation is missing");
                         committed = ActionContinuationState.result(execution);
+                        access = ActionEffectAccess.decode(execution.state().get("journal"));
                     } else {
                         committed = decodeResult(receipt.result());
+                        if (receipt.result().containsKey("access")) access = ActionEffectAccess.decode(receipt.result().get("access"));
                     }
-                    requireChanges(context, actor, definition, resolved, committed.affected(), transaction);
+                    if (access == null) requireChanges(context, actor, definition, resolved, committed.affected(), transaction);
+                    else if (!authorizer.allowedReplay(context, actor, definition, resolved, access, transaction)) throw new SecurityException("Action replay denied");
                 } else {
                     parameters.forEach((name, value) -> checkReferenceVersions(value, resolved.get(name)));
-                    committed = applyEffects(manifest, definition, context, actor, resolved, storage, transaction, true);
+                    var access = new ArrayList<ActionEffectAccess>();
+                    committed = applyEffects(manifest, definition, context, actor, resolved, storage, transaction, true, access);
                     if (!committed.success()) return committed;
                     if (key != null) {
                         Map<String, Object> result = manifest.sideEffects().isEmpty()
                                 ? Map.of("format", 1, "success", true, "actionId", committed.actionId(), "affected", committed.affected().stream()
-                                        .map(entity -> Map.of("type", entity.type(), "id", entity.id())).toList())
+                                        .map(entity -> Map.of("type", entity.type(), "id", entity.id())).toList(),
+                                        "access", access.stream().map(ActionEffectAccess::encode).toList())
                                 : Map.of("format", 2, "actionId", committed.actionId());
                         transaction.putCommandReceipt(new org.openfoundry.foundation.spi.CommandReceipt(key, actor.id(), manifest.action(), fingerprint, result));
                     }
@@ -222,7 +228,7 @@ public final class ActionExecutor {
     private ActionResult executeEffects(ActionManifest manifest, ActionTypeDefinition definition, RequestContext context, ActionActor actor,
                                         Map<String, Object> parameters, StorageProvider storage) {
         try (Transaction transaction = storage.beginTransaction(context)) {
-            ActionResult result = applyEffects(manifest, definition, context, actor, parameters, storage, transaction, false);
+            ActionResult result = applyEffects(manifest, definition, context, actor, parameters, storage, transaction, false, new ArrayList<>());
             if (result.success()) transaction.commit();
             return result;
         }
@@ -230,7 +236,7 @@ public final class ActionExecutor {
 
     private ActionResult applyEffects(ActionManifest manifest, ActionTypeDefinition definition, RequestContext context, ActionActor actor,
                                       Map<String, Object> parameters, StorageProvider storage, Transaction transaction,
-                                      boolean transactional) {
+                                      boolean transactional, List<ActionEffectAccess> access) {
         String actionId = "act_" + UUID.randomUUID();
         Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
         var expressions = new ActionValues(parameters, actor, now);
@@ -247,6 +253,9 @@ public final class ActionExecutor {
             if (effect instanceof ActionManifest.UpdateObject update) {
                 ObjectRecord target = expressions.object(update.target());
                 if (transactional) target = transaction.getObject(target.type(), target.id());
+                if (!authorizer.allowedUpdate(context, actor, definition, parameters, target.key(), ActionEffectAccess.decode(journal), transaction)) {
+                    throw new SecurityException("Action update target denied");
+                }
                 Map<String, Object> values = expressions.properties(update.set());
                 var updated = transaction.updateObject(target.type(), target.id(), values, target.version());
                 journal.add(ActionContinuationState.undo("UPDATE_OBJECT", target.key(), updated.version(), target.properties()));
@@ -267,8 +276,9 @@ public final class ActionExecutor {
                 affected.add(new EntityKey(link.type(), link.id()));
             } else if (effect instanceof ActionManifest.DeleteLink delete) {
                 List<LinkRecord> selected = selectLinks(delete, expressions, context, storage, transaction, transactional);
-                var keys = selected.stream().map(link -> new EntityKey(link.type(), link.id())).toList();
-                requireChanges(context, actor, definition, parameters, keys, transaction);
+                if (!authorizer.allowedSelection(context, actor, definition, parameters, ActionEffectAccess.decode(journal), selected, transaction)) {
+                    throw new SecurityException("Action relationship selection denied");
+                }
                 if (delete.expect() == ActionManifest.LinkExpectation.ONE && selected.size() != 1) {
                     throw new LinkResolutionException(selected.isEmpty() ? "LINK_NOT_FOUND" : "LINK_RESOLUTION_AMBIGUOUS");
                 }
@@ -280,6 +290,10 @@ public final class ActionExecutor {
             }
         }
 
+        access.addAll(ActionEffectAccess.decode(journal));
+        if (!authorizer.allowedEffects(context, actor, definition, parameters, access, transaction)) {
+            throw new SecurityException("Action effects denied");
+        }
         boolean continued = !manifest.sideEffects().isEmpty();
         if (continued) {
             transaction.putActionExecution(new org.openfoundry.foundation.spi.ActionExecution(actionId, actor.id(), manifest.action(), 1,

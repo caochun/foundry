@@ -27,3 +27,5 @@ ActionTypeDefinition保留两参数构造器，但其permission为空，默认�
 - OpenFGA Check使用`/stores/{store}/check`和body的authorization_model_id；用户及资源的ID使用`base64url(tenant).base64url(localId)`，元组配置方须共用OpenFgaResourceIds。已有未隔离元组须重新供应，不提供旧编码回退。HTTP请求超时为5秒，真实模型/授权生命周期仍待集成。
 
 数据库数据布局未改变。此次验证未重建运行中的Mirror JAR、未迁移业务数据或部署生产权限模型。
+
+后续：上述统一资源关系检查保留为STRICT_RESOURCES。与上游模型兼容的新模式、最小授权变更记录及真实OpenFGA验证见[ADR-0013](0013-ontology-authorization-targets.md)。

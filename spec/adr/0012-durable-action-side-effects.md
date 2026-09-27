@@ -48,4 +48,6 @@ createObject支持上游省略target的生成ID模式，并把新对象按类型
 
 原始core/library manifest、ODL、BorrowBook/ReturnBook及目录数据用于兼容测试；测试显式提供受控授权，并自行初始化目录数据。因此不将权限文件自动装配、Pack种子自动执行、跨Pack模型组合或真实事件总线/国产库联调算作完成。声明式条件effect、Consent/Undo、计算字段、类型化API、持久Schema Registry及运维修复入口仍按总计划推进。
 
-已确认的权限集成缺口：当前通用API对所有对象引用及影响实体使用同一动作关系，上游Library的book声明can_borrow/can_return而member没有这些关系。本阶段受控授权验证业务执行链，不能据此宣称原FGA文件可直接投入使用；权限目标映射及真实模型联调列为后续F1任务。
+本阶段曾确认的权限集成缺口：当时通用API对所有对象引用及影响实体使用同一动作关系，上游Library的book声明can_borrow/can_return而member没有这些关系。本阶段受控授权验证业务执行链，不能据此宣称原FGA文件可直接投入使用；权限目标映射及真实模型联调列为后续F1任务。
+
+后续：[ADR-0013](0013-ontology-authorization-targets.md)增加显式本体目标模式并完成原始Library模型的真实OpenFGA验证；旧严格模式继续保留，自动权限资产装配与身份系统仍待完成。
