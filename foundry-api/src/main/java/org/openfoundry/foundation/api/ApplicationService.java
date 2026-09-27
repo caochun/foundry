@@ -36,6 +36,7 @@ public final class ApplicationService {
     private final Map<String, List<ComputedFieldDefinition>> computedFields;
     private final ComputedFieldEvaluator computedEvaluator;
     private final Set<String> enumTypes;
+    private final OntologySchema schema;
 
     public static ApplicationService fromBundle(StorageProvider storage, AuthorizationService authorization, ActionExecutor actions,
                                                  org.openfoundry.foundation.pack.LoadedPackBundle bundle, AuthorizationMode mode) {
@@ -55,6 +56,7 @@ public final class ApplicationService {
     public ApplicationService(StorageProvider storage, AuthorizationService authorization, ActionExecutor actions,
                               OntologySchema schema, Map<String, ActionManifest> manifests, Map<String, FieldPolicy> fieldPolicies,
                               AuthorizationMode authorizationMode) {
+        this.schema = schema;
         this.authorizationMode = Objects.requireNonNull(authorizationMode);
         if (authorizationMode == AuthorizationMode.ONTOLOGY_TARGETS && schema == null) throw new IllegalArgumentException("Ontology authorization requires a schema");
         this.objectTypes = schema == null ? Set.of() : schema.objectTypes().stream()
@@ -106,9 +108,32 @@ public final class ApplicationService {
 
     public List<ObjectRecord> listObjects(RequestContext context, SecurityPrincipal principal, String type, QueryOptions options) {
         requireContext(context, principal);
-        return storage.queryObjects(context, type, options).stream()
-                .filter(object -> authorization.check(context, principal, "viewer", object.key()))
+        if (schema != null) return queryObjects(context, principal, type, ObjectQuery.all(options)).items();
+        // Metadata-only legacy callers still paginate after permission filtering.
+        var rows = storage.queryObjects(context, type, allRows(options)).stream()
+                .filter(object -> authorization.check(context, principal, "viewer", object.key())).toList();
+        return rows.stream().skip(options.offset()).limit(options.limit())
                 .map(object -> project(context, principal, object, options)).toList();
+    }
+
+    public ObjectQueryResult queryObjects(RequestContext context, SecurityPrincipal principal, String type, ObjectQuery query) {
+        requireContext(context, principal);
+        if (schema == null || !objectTypes.contains(type)) throw new IllegalArgumentException("Query requires a registered object type");
+        var plan = new ObjectQueryPlan(schema, properties.get(type), visibleFields(principal, type));
+        var predicate = plan.predicate(query.filter());
+        var comparator = plan.comparator(query.orderBy());
+        var options = query.options();
+        // One storage read supplies both rows and count. SQL pushdown is a separate optimization.
+        var matching = storage.queryObjects(context, type, allRows(options)).stream()
+                .filter(object -> authorization.check(context, principal, "viewer", object.key()))
+                .filter(predicate).sorted(comparator).toList();
+        var items = matching.stream().skip(options.offset()).limit(options.limit())
+                .map(object -> project(context, principal, object, options)).toList();
+        return new ObjectQueryResult(items, matching.size(), options.offset());
+    }
+
+    private static QueryOptions allRows(QueryOptions options) {
+        return new QueryOptions(Integer.MAX_VALUE, 0, options.asOfValidTime(), options.asOfRecordedTime(), options.includeDeleted());
     }
 
     public List<HistorySnapshot> history(RequestContext context, SecurityPrincipal principal, EntityKey key) {
@@ -346,6 +371,13 @@ public final class ApplicationService {
     }
 
     private Map<String, Object> visible(SecurityPrincipal principal, String type, Map<String, Object> values) {
+        Set<String> allowed = visibleFields(principal, type);
+        var result = new LinkedHashMap<String, Object>();
+        for (var field : values.entrySet()) if (allowed.contains(field.getKey())) result.put(field.getKey(), field.getValue());
+        return Collections.unmodifiableMap(result);
+    }
+
+    private Set<String> visibleFields(SecurityPrincipal principal, String type) {
         var declared = properties.getOrDefault(type, List.of());
         FieldPolicy policy = fieldPolicies.get(type);
         Set<String> allowed;
@@ -356,9 +388,7 @@ public final class ApplicationService {
             principal.roles().forEach(role -> allowed.addAll(policy.fieldsByRole().getOrDefault(role, Set.of())));
             allowed.retainAll(declared.stream().map(PropertyDefinition::name).collect(Collectors.toSet()));
         }
-        var result = new LinkedHashMap<String, Object>();
-        for (var field : values.entrySet()) if (allowed.contains(field.getKey())) result.put(field.getKey(), field.getValue());
-        return Collections.unmodifiableMap(result);
+        return allowed;
     }
 
     private static void requireContext(RequestContext context, SecurityPrincipal principal) {

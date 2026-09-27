@@ -10,7 +10,7 @@ public final class GraphqlContractGenerator {
     }
 
     public String generate(OntologySchema schema, GraphqlApiRuntime.ActionMode mode) {
-        if (mode == GraphqlApiRuntime.ActionMode.TYPED) GraphqlActionTypes.validateNames(schema, schema.actionTypes());
+        GraphqlActionTypes.validateNames(schema, mode == GraphqlApiRuntime.ActionMode.TYPED ? schema.actionTypes() : java.util.List.of());
         StringBuilder result = new StringBuilder("scalar JSON\nscalar Date\nscalar DateTime\nscalar Duration\nscalar URI\nscalar GeoPoint\n\n");
         schema.enums().forEach((name, values) -> result.append("enum ").append(name).append(" { ").append(String.join(" ", values)).append(" }\n"));
         for (var type : schema.interfaces()) {
@@ -34,10 +34,15 @@ public final class GraphqlContractGenerator {
             type.computedFields().forEach(field -> result.append("  ").append(field.name()).append(": ").append(field.type()).append("\n"));
             result.append("}\n\n");
         }
+        result.append(GraphqlQueryTypes.sdl(schema));
         result.append("type Query {\n");
-        schema.objectTypes().forEach(object -> result.append("  ").append(lower(object.name())).append("(id: ID!): ")
-                .append(object.name()).append("\n  ").append(lower(object.name())).append("s(first: Int, offset: Int): [")
-                .append(object.name()).append("!]!\n"));
+        for (var object : schema.objectTypes()) {
+            String singular = lower(object.name());
+            String arguments = "filter: " + object.name() + "Filter, orderBy: " + object.name() + "OrderBy, first: Int = 100, offset: Int = 0";
+            result.append("  ").append(singular).append("(id: ID!): ").append(object.name()).append("\n");
+            result.append("  ").append(singular).append("s(").append(arguments).append("): [").append(object.name()).append("!]!\n");
+            result.append("  ").append(singular).append("sConnection(").append(arguments).append(", after: String): ").append(object.name()).append("Connection!\n");
+        }
         result.append("}\n\n");
         if (!schema.actionTypes().isEmpty()) {
             if (mode == GraphqlApiRuntime.ActionMode.TYPED) {

@@ -23,6 +23,7 @@ final class GraphqlActionTypes {
         names.addAll(schema.enums().keySet());
         for (String scalar : PropertyValues.SCALARS) if (names.contains(scalar)) throw new IllegalArgumentException("Reserved GraphQL scalar name: " + scalar);
         for (String name : List.of("Query", "Mutation")) if (names.contains(name)) throw new IllegalArgumentException("Reserved GraphQL type name: " + name);
+        for (String name : GraphqlQueryTypes.names(schema)) reserve(names, name);
         if (actions.isEmpty()) return;
         for (String name : List.of("ActionError", "AffectedObject", "ChangeType")) reserve(names, name);
         var mutations = new HashSet<String>();
@@ -48,7 +49,7 @@ final class GraphqlActionTypes {
         return input.build();
     }
 
-    private static GraphQLInputType inputType(String type, OntologySchema schema, Map<String, GraphQLEnumType> enums) {
+    static GraphQLInputType inputType(String type, OntologySchema schema, Map<String, GraphQLEnumType> enums) {
         if (type.endsWith("!")) return GraphQLNonNull.nonNull(inputType(type.substring(0, type.length() - 1), schema, enums));
         if (type.startsWith("[") && type.endsWith("]")) return GraphQLList.list(inputType(type.substring(1, type.length() - 1), schema, enums));
         if (schema.objectTypes().stream().anyMatch(object -> object.name().equals(type))) return Scalars.GraphQLID;

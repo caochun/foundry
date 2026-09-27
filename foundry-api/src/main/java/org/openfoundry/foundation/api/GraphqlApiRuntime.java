@@ -54,7 +54,7 @@ public final class GraphqlApiRuntime {
             if (type == null || !name.equals(manifests.get(name).action())) throw new IllegalArgumentException("Unregistered GraphQL action: " + name);
             return type;
         }).toList();
-        if (actionMode == ActionMode.TYPED) GraphqlActionTypes.validateNames(schema, active);
+        GraphqlActionTypes.validateNames(schema, actionMode == ActionMode.TYPED ? active : List.of());
         Map<String, graphql.schema.GraphQLEnumType> enums = new java.util.LinkedHashMap<>();
         schema.enums().forEach((name, values) -> {
             var enumeration = graphql.schema.GraphQLEnumType.newEnum().name(name);
@@ -90,6 +90,8 @@ public final class GraphqlApiRuntime {
             linkTypes.put(definition.name(), link.build());
         }
 
+        var queryInputs = GraphqlQueryTypes.inputs(schema, enums);
+        var pageInfo = GraphqlQueryTypes.pageInfo();
         GraphQLObjectType.Builder query = GraphQLObjectType.newObject().name("Query");
         for (ObjectTypeDefinition definition : schema.objectTypes()) {
             GraphQLObjectType type = objectTypes.get(definition.name());
@@ -101,16 +103,21 @@ public final class GraphqlApiRuntime {
                         String id = env.getArgument("id");
                         return application.getObject(request.request(), request.principal(), definition.name(), id);
                     }).build());
-            query.field(GraphQLFieldDefinition.newFieldDefinition().name(singular + "s")
-                    .type(GraphQLNonNull.nonNull(GraphQLList.list(GraphQLNonNull.nonNull(type))))
-                    .argument(GraphQLArgument.newArgument().name("first").type(Scalars.GraphQLInt).defaultValue(100))
-                    .argument(GraphQLArgument.newArgument().name("offset").type(Scalars.GraphQLInt).defaultValue(0))
+            query.field(GraphqlQueryTypes.arguments(GraphQLFieldDefinition.newFieldDefinition().name(singular + "s")
+                    .type(GraphQLNonNull.nonNull(GraphQLList.list(GraphQLNonNull.nonNull(type)))), definition.name(), queryInputs, false)
                     .dataFetcher(env -> {
-                        ApiRequestContext request = request(env);
-                        int first = env.getArgumentOrDefault("first", 100);
-                        int offset = env.getArgumentOrDefault("offset", 0);
-                        return application.listObjects(request.request(), request.principal(), definition.name(),
-                                new QueryOptions(first, offset, null, null, false));
+                        var request = request(env);
+                        var input = GraphqlQueryTypes.query(env);
+                        if (input.filter().isEmpty() && input.orderBy().isEmpty()) {
+                            return application.listObjects(request.request(), request.principal(), definition.name(), input.options());
+                        }
+                        return application.queryObjects(request.request(), request.principal(), definition.name(), input).items();
+                    }).build());
+            query.field(GraphqlQueryTypes.arguments(GraphQLFieldDefinition.newFieldDefinition().name(singular + "sConnection")
+                    .type(GraphQLNonNull.nonNull(GraphqlQueryTypes.connection(type, pageInfo))), definition.name(), queryInputs, true)
+                    .dataFetcher(env -> {
+                        var request = request(env);
+                        return application.queryObjects(request.request(), request.principal(), definition.name(), GraphqlQueryTypes.query(env)).connection();
                     }).build());
         }
 
