@@ -33,6 +33,11 @@ public final class ApplicationService {
     private final Set<String> objectTypes;
     private final AuthorizationMode authorizationMode;
 
+    public static ApplicationService fromBundle(StorageProvider storage, AuthorizationService authorization, ActionExecutor actions,
+                                                 org.openfoundry.foundation.pack.LoadedPackBundle bundle, AuthorizationMode mode) {
+        return new ApplicationService(storage, authorization, actions, bundle.ontology().schema(), bundle.actions(), bundle.assets().fieldPolicies(), mode);
+    }
+
     /** Legacy construction is metadata-only and cannot execute Actions without trusted registration. */
     public ApplicationService(StorageProvider storage, AuthorizationService authorization, ActionExecutor actions) {
         this(storage, authorization, actions, null, Map.of(), Map.of());
@@ -162,7 +167,7 @@ public final class ApplicationService {
 
     private boolean visibleLinkField(SecurityPrincipal principal, String owner, LinkFieldDefinition field) {
         var policy = fieldPolicies.get(owner);
-        if (policy == null) return !field.sensitive();
+        if (policy == null || policy.storedFieldsOnly()) return !field.sensitive();
         return policy.alwaysVisible().contains(field.name()) || principal.roles().stream()
                 .anyMatch(role -> policy.fieldsByRole().getOrDefault(role, Set.of()).contains(field.name()));
     }

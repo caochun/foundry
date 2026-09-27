@@ -15,7 +15,6 @@
             <groupId>org.openfoundry</groupId>
             <artifactId>foundry-pack</artifactId>
             <version>${project.version}</version>
-            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.openfoundry</groupId>

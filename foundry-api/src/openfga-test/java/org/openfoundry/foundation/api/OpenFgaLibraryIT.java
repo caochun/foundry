@@ -10,7 +10,8 @@ import org.junit.jupiter.api.TestFactory;
 import org.openfoundry.foundation.actions.*;
 import org.openfoundry.foundation.events.CloudEvent;
 import org.openfoundry.foundation.pack.DomainPackLoader;
-import org.openfoundry.foundation.pack.LoadedDomainPack;
+import org.openfoundry.foundation.pack.LoadedPackBundle;
+import org.openfoundry.foundation.pack.PackSeeder;
 import org.openfoundry.foundation.security.*;
 import org.openfoundry.foundation.spi.*;
 import org.openfoundry.foundation.storage.jdbc.*;
@@ -36,8 +37,6 @@ import static org.junit.jupiter.api.Assertions.*;
 /** Enabled explicitly with -Popenfga-integration. Requires a real, isolated loopback OpenFGA server. */
 class OpenFgaLibraryIT {
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final EntityKey BOOK = new EntityKey("Book", "book");
-    private static final EntityKey MEMBER = new EntityKey("Member", "member");
 
     @TestFactory
     Stream<DynamicTest> upstreamPermissionsAgainstRealOpenFga() {
@@ -58,39 +57,44 @@ class OpenFgaLibraryIT {
         var borrowed = f.borrow(f.context, f.principal);
         assertEquals("COMPLETED", borrowed.status());
         assertEquals(1, f.events.size());
-        assertEquals(Map.of("bookId", "book", "memberId", "member"), f.events.getFirst().data());
+        assertEquals(Map.of("bookId", f.book.id(), "memberId", f.member.id()), f.events.getFirst().data());
+        assertEquals("ada@example.org", f.app.getObject(f.context, f.principal, "Member", f.member.id()).properties().get("email"));
+        var viewer = new SecurityPrincipal(f.principal.id(), f.principal.tenantId(), Set.of());
+        assertFalse(f.app.getObject(f.context, viewer, "Member", f.member.id()).properties().containsKey("email"));
+        assertEquals(1, ((List<?>) f.app.readLinkField(f.context, f.principal, f.member, "books", QueryOptions.defaults())).size());
+        assertEquals(0, f.seed(f.context).createdObjects());
         assertEquals(borrowed, f.borrow(f.context, f.principal));
         assertEquals(1, f.events.size());
-        assertEquals("member", ((ObjectRecord) f.app.readLinkField(f.context, f.principal, BOOK, "borrower", QueryOptions.defaults())).id());
+        assertEquals(f.member.id(), ((ObjectRecord) f.app.readLinkField(f.context, f.principal, f.book, "borrower", QueryOptions.defaults())).id());
         assertFalse(f.app.history(f.context, f.principal, borrowed.affected().getLast()).isEmpty());
         var returned = f.returnBook();
         assertTrue(returned.success());
-        assertEquals("AVAILABLE", f.storage.getObject(f.context, "Book", "book").properties().get("status"));
-        assertTrue(f.storage.getLinks(f.context, BOOK, "BorrowedBy", StorageProvider.Direction.OUTBOUND, QueryOptions.defaults()).isEmpty());
+        assertEquals("AVAILABLE", f.storage.getObject(f.context, "Book", f.book.id()).properties().get("status"));
+        assertTrue(f.storage.getLinks(f.context, f.book, "BorrowedBy", StorageProvider.Direction.OUTBOUND, QueryOptions.defaults()).isEmpty());
         assertEquals(returned, f.returnBook());
     }
 
     private void targetRevocation(Fixture f) {
         f.borrow(f.context, f.principal);
-        f.tuple(f.principal, BOOK, "librarian", false);
+        f.tuple(f.principal, f.book, "librarian", false);
         assertThrows(SecurityException.class, () -> f.borrow(f.context, f.principal));
         assertEquals(1, f.events.size());
-        assertEquals(2, f.storage.getObject(f.context, "Book", "book").version());
-        f.tuple(f.principal, BOOK, "librarian", true);
+        assertEquals(2, f.storage.getObject(f.context, "Book", f.book.id()).version());
+        f.tuple(f.principal, f.book, "librarian", true);
         assertTrue(f.borrow(f.context, f.principal).success());
     }
 
     private void participantRevocation(Fixture f) {
         var result = f.borrow(f.context, f.principal);
-        f.tuple(f.principal, MEMBER, "librarian", false);
+        f.tuple(f.principal, f.member, "librarian", false);
         assertThrows(SecurityException.class, f::returnBook);
-        assertEquals("ON_LOAN", f.storage.getObject(f.context, "Book", "book").properties().get("status"));
+        assertEquals("ON_LOAN", f.storage.getObject(f.context, "Book", f.book.id()).properties().get("status"));
         assertFalse(f.storage.getLink(f.context, "BorrowedBy", result.affected().getLast().id()).isDeleted());
-        f.tuple(f.principal, MEMBER, "librarian", true);
+        f.tuple(f.principal, f.member, "librarian", true);
         assertTrue(f.returnBook().success());
-        f.tuple(f.principal, MEMBER, "librarian", false);
+        f.tuple(f.principal, f.member, "librarian", false);
         assertThrows(SecurityException.class, f::returnBook);
-        assertEquals(3, f.storage.getObject(f.context, "Book", "book").version());
+        assertEquals(3, f.storage.getObject(f.context, "Book", f.book.id()).version());
     }
 
     private void tenantIsolation(Fixture f) {
@@ -99,10 +103,10 @@ class OpenFgaLibraryIT {
         var otherPrincipal = new SecurityPrincipal("librarian", "other-tenant", Set.of("librarian"));
         f.seed(otherContext);
         assertThrows(SecurityException.class, () -> f.borrow(otherContext, otherPrincipal));
-        assertEquals("AVAILABLE", f.storage.getObject(otherContext, "Book", "book").properties().get("status"));
+        assertEquals("AVAILABLE", f.storage.getObject(otherContext, "Book", f.book.id()).properties().get("status"));
         assertThrows(SecurityException.class, () -> f.borrow(f.context, otherPrincipal));
-        f.tuple(otherPrincipal, BOOK, "librarian", true);
-        f.tuple(otherPrincipal, MEMBER, "librarian", true);
+        f.tuple(otherPrincipal, f.book, "librarian", true);
+        f.tuple(otherPrincipal, f.member, "librarian", true);
         assertTrue(f.borrow(otherContext, otherPrincipal).success());
         assertEquals(2, f.events.size());
         assertNotEquals(f.events.getFirst().tenantId(), f.events.getLast().tenantId());
@@ -135,7 +139,9 @@ class OpenFgaLibraryIT {
         final String store;
         final String modelId;
         final JsonNode model;
-        final LoadedDomainPack library;
+        final LoadedPackBundle library;
+        final EntityKey book;
+        final EntityKey member;
         final StorageProvider storage;
         final JdbcConnectionPool pool;
         final ApplicationService app;
@@ -150,10 +156,16 @@ class OpenFgaLibraryIT {
             endpoint = URI.create(address);
             if (!Set.of("localhost", "127.0.0.1", "[::1]").contains(endpoint.getHost())) throw new IllegalArgumentException("Integration store writes require loopback");
             Path root = Path.of(getClass().getResource("/upstream-v0.3.0").toURI());
-            library = new DomainPackLoader().loadAll(List.of(root.resolve("core"), root.resolve("library"))).stream()
-                    .filter(pack -> pack.manifest().name().equals("library")).findFirst().orElseThrow();
+            library = new DomainPackLoader().loadBundle(List.of(root.resolve("core"), root.resolve("library")));
+            var origin = new java.util.Properties();
+            try (var resource = getClass().getResourceAsStream("/openfga/library-model.properties")) { origin.load(resource); }
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            assertEquals(origin.getProperty("dsl.sha256"), java.util.HexFormat.of().formatHex(digest.digest(
+                    library.assets().permissions().getFirst().dsl().getBytes(StandardCharsets.UTF_8))), "Loaded DSL must match the official model fixture");
             try (var resource = getClass().getResourceAsStream("/openfga/library-model.json")) {
-                model = JSON.readTree(resource);
+                byte[] bytes = resource.readAllBytes();
+                assertEquals(origin.getProperty("json.sha256"), java.util.HexFormat.of().formatHex(digest.digest(bytes)));
+                model = JSON.readTree(bytes);
             }
             store = call("POST", "/stores", Map.of("name", "foundry-parity-" + UUID.randomUUID())).path("id").asText();
             modelId = call("POST", "/stores/" + store + "/authorization-models", model).path("authorization_model_id").asText();
@@ -169,28 +181,25 @@ class OpenFgaLibraryIT {
                 storage = new InMemoryStorageProvider();
             }
             storage.applySchema(context, library.ontology().schema());
-            seed(context);
-            tuple(principal, BOOK, "librarian", true);
-            tuple(principal, MEMBER, "librarian", true);
-            app = new ApplicationService(storage, new AuthorizationService(authorizer),
-                    new ActionExecutor().withSideEffects(new StandardSideEffectHandler(events::add)), library.ontology().schema(),
-                    library.actions(), Map.of(), AuthorizationMode.ONTOLOGY_TARGETS);
+            var seeded = seed(context);
+            book = seeded.references().get("example.library:book-dune");
+            member = seeded.references().get("example.library:member-ada");
+            tuple(principal, book, "librarian", true);
+            tuple(principal, member, "librarian", true);
+            app = ApplicationService.fromBundle(storage, new AuthorizationService(authorizer),
+                    new ActionExecutor().withSideEffects(new StandardSideEffectHandler(events::add)), library, AuthorizationMode.ONTOLOGY_TARGETS);
         }
 
-        void seed(RequestContext ctx) {
-            try (var tx = storage.beginTransaction(ctx)) {
-                tx.createObject("Book", "book", Map.of("title", "Book", "author", "Author", "status", "AVAILABLE"));
-                tx.createObject("Member", "member", Map.of("name", "Member"));
-                tx.commit();
-            }
+        PackSeeder.SeedResult seed(RequestContext ctx) {
+            return new PackSeeder().apply(RequestContext.system(ctx.tenantId(), "bootstrap"), library, storage);
         }
 
         ActionResult borrow(RequestContext ctx, SecurityPrincipal who) {
-            return app.execute(library.actions().get("BorrowBook"), ctx, who, Map.of("book", "book", "member", "member"), "borrow");
+            return app.execute(library.actions().get("BorrowBook"), ctx, who, Map.of("book", book.id(), "member", member.id()), "borrow");
         }
 
         ActionResult returnBook() {
-            return app.execute(library.actions().get("ReturnBook"), context, principal, Map.of("book", "book"), "return");
+            return app.execute(library.actions().get("ReturnBook"), context, principal, Map.of("book", book.id()), "return");
         }
 
         void tuple(SecurityPrincipal who, EntityKey resource, String relation, boolean write) {

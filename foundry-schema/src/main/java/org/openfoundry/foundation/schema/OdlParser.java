@@ -36,15 +36,69 @@ public final class OdlParser {
     private final Parser parser = new Parser();
 
     public OntologySchema parse(String source) {
-        Objects.requireNonNull(source, "source must not be null");
-        Document document;
-        try {
-            document = parser.parseDocument(source);
-        } catch (RuntimeException exception) {
-            throw new SchemaValidationException(List.of("ODL parse error: " + exception.getMessage()));
-        }
+        var document = document(source);
+        return resolve(document, findNamespace(document));
+    }
 
-        Namespace namespace = findNamespace(document);
+    public OdlSourceDescription describe(String source) {
+        var document = document(source);
+        var namespace = findNamespace(document);
+        var declarations = new java.util.LinkedHashSet<String>();
+        var references = new java.util.LinkedHashSet<String>();
+        for (var definition : document.getDefinitions()) {
+            if (definition instanceof graphql.language.TypeDefinition<?> type && !declarations.add(type.getName())) {
+                throw new SchemaValidationException(List.of("duplicate source type: " + type.getName()));
+            }
+            collectReferences(definition, references);
+        }
+        return new OdlSourceDescription(namespace.name(), namespace.version(), declarations, references);
+    }
+
+    public OntologySchema compose(String namespace, String version, List<String> sources) {
+        var definitions = new ArrayList<Definition<?>>();
+        var names = new LinkedHashMap<String, graphql.language.TypeDefinition<?>>();
+        for (String source : sources) {
+            var document = document(source);
+            findNamespace(document);
+            for (var definition : document.getDefinitions()) {
+                if (definition instanceof SchemaDefinition || definition instanceof SchemaExtensionDefinition) continue;
+                if (definition instanceof graphql.language.TypeDefinition<?> type) {
+                    var previous = names.putIfAbsent(type.getName(), type);
+                    if (previous != null) {
+                        if (type instanceof graphql.language.ScalarTypeDefinition && previous instanceof graphql.language.ScalarTypeDefinition
+                                && org.openfoundry.foundation.spi.schema.PropertyValues.SCALARS.contains(type.getName())
+                                && graphql.language.AstPrinter.printAstCompact(previous).equals(graphql.language.AstPrinter.printAstCompact(type))) continue;
+                        throw new SchemaValidationException(List.of("conflicting composed type: " + type.getName()));
+                    }
+                }
+                definitions.add(definition);
+            }
+        }
+        var merged = Document.newDocument();
+        definitions.forEach(merged::definition);
+        return resolve(merged.build(), new Namespace(namespace, version));
+    }
+
+    private Document document(String source) {
+        Objects.requireNonNull(source, "source must not be null");
+        try { return parser.parseDocument(source); }
+        catch (RuntimeException invalid) { throw new SchemaValidationException(List.of("ODL parse error: " + invalid.getMessage())); }
+    }
+
+    private static void collectReferences(graphql.language.Node<?> node, Set<String> references) {
+        if (node instanceof TypeName type) references.add(type.getName());
+        if (node instanceof Directive directive) {
+            var names = switch (directive.getName()) {
+                case "linkType" -> List.of("from", "to");
+                case "link" -> List.of("type");
+                default -> List.<String>of();
+            };
+            for (String name : names) references.add(requiredStringArgument(directive, name));
+        }
+        for (var child : node.getChildren()) collectReferences(child, references);
+    }
+
+    private OntologySchema resolve(Document document, Namespace namespace) {
         List<ObjectTypeDefinition> objects = new ArrayList<>();
         List<LinkTypeDefinition> links = new ArrayList<>();
         List<ActionTypeDefinition> actions = new ArrayList<>();
@@ -256,20 +310,19 @@ public final class OdlParser {
     }
 
     private static Namespace findNamespace(Document document) {
+        Namespace result = null;
         for (Definition<?> definition : document.getDefinitions()) {
-            if (!(definition instanceof SchemaDefinition) && !(definition instanceof SchemaExtensionDefinition)) {
-                continue;
-            }
-            DirectivesContainer<?> container = (DirectivesContainer<?>) definition;
-            Directive namespace = container.getDirectives().stream()
-                    .filter(candidate -> candidate.getName().equals("namespace"))
-                    .findFirst().orElse(null);
-            if (namespace != null) {
-                return new Namespace(requiredStringArgument(namespace, "name"),
-                        requiredStringArgument(namespace, "version"));
+            if (!(definition instanceof SchemaDefinition) && !(definition instanceof SchemaExtensionDefinition)) continue;
+            var container = (DirectivesContainer<?>) definition;
+            for (var directive : container.getDirectives()) {
+                if (!directive.getName().equals("namespace")) continue;
+                var declared = new Namespace(requiredStringArgument(directive, "name"), requiredStringArgument(directive, "version"));
+                if (result != null && !result.equals(declared)) throw new SchemaValidationException(List.of("conflicting namespace declarations"));
+                result = declared;
             }
         }
-        throw new SchemaValidationException(List.of("schema must declare @namespace(name, version)"));
+        if (result == null) throw new SchemaValidationException(List.of("schema must declare @namespace(name, version)"));
+        return result;
     }
 
     private static boolean hasDirective(DirectivesContainer<?> node, String name) {
