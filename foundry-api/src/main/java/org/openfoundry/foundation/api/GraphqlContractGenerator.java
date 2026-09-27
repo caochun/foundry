@@ -38,6 +38,8 @@ public final class GraphqlContractGenerator {
         result.append("type Query {\n");
         for (var object : schema.objectTypes()) {
             String singular = lower(object.name());
+            result.append("  ").append(singular).append("Aggregate(filter: ").append(object.name())
+                    .append("Filter, groupBy: [String!], fields: [AggregateFieldInput!]!, orderBy: [AggregateOrderInput!], limit: Int, offset: Int): AggregateResult!\n");
             String arguments = "filter: " + object.name() + "Filter, orderBy: " + object.name() + "OrderBy, first: Int = 100, offset: Int = 0";
             result.append("  ").append(singular).append("(id: ID!): ").append(object.name()).append("\n");
             result.append("  ").append(singular).append("s(").append(arguments).append("): [").append(object.name()).append("!]!\n");

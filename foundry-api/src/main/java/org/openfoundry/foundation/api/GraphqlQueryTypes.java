@@ -19,12 +19,13 @@ final class GraphqlQueryTypes {
         var names = new HashSet<String>();
         reserve(names, "SortDirection");
         reserve(names, "PageInfo");
+        for (String name : GraphqlAggregateTypes.NAMES) reserve(names, name);
         for (String scalar : scalarTypes(schema)) reserve(names, scalar + "Filter");
         var queries = new HashSet<String>();
         for (var object : schema.objectTypes()) {
             for (String suffix : List.of("Filter", "OrderBy", "Connection", "Edge")) reserve(names, object.name() + suffix);
             String singular = Character.toLowerCase(object.name().charAt(0)) + object.name().substring(1);
-            for (String suffix : List.of("", "s", "sConnection")) reserve(queries, singular + suffix);
+            for (String suffix : List.of("", "s", "sConnection", "Aggregate")) reserve(queries, singular + suffix);
             for (var field : object.properties()) {
                 if (Set.of("AND", "OR", "NOT").contains(field.name())) {
                     throw new IllegalArgumentException("Query logical operator conflicts with property: " + field.name());
@@ -159,6 +160,7 @@ final class GraphqlQueryTypes {
             result.append("type ").append(name).append("Edge { node: ").append(name).append("! cursor: String! }\n");
             result.append("type ").append(name).append("Connection { edges: [").append(name).append("Edge!]! pageInfo: PageInfo! totalCount: Int! }\n");
         }
+        result.append(GraphqlAggregateTypes.sdl());
         return result.toString();
     }
 }

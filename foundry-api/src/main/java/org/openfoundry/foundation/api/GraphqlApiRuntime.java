@@ -92,10 +92,12 @@ public final class GraphqlApiRuntime {
 
         var queryInputs = GraphqlQueryTypes.inputs(schema, enums);
         var pageInfo = GraphqlQueryTypes.pageInfo();
+        var aggregates = new GraphqlAggregateTypes();
         GraphQLObjectType.Builder query = GraphQLObjectType.newObject().name("Query");
         for (ObjectTypeDefinition definition : schema.objectTypes()) {
             GraphQLObjectType type = objectTypes.get(definition.name());
             String singular = lower(definition.name());
+            query.field(aggregates.field(definition.name(), singular + "Aggregate", queryInputs.get(definition.name() + "Filter"), application));
             query.field(GraphQLFieldDefinition.newFieldDefinition().name(singular)
                     .type(type).argument(GraphQLArgument.newArgument().name("id").type(GraphQLNonNull.nonNull(Scalars.GraphQLID)))
                     .dataFetcher(env -> {

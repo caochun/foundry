@@ -56,6 +56,16 @@ public final class RestApiRouter {
         }
     }
 
+    public ApiResponse aggregate(RequestContext context, SecurityPrincipal principal, String type, AggregateQuery query) {
+        try {
+            return ApiResponse.ok(application.aggregateObjects(context, principal, type, query));
+        } catch (SecurityException denied) {
+            return ApiResponse.forbidden();
+        } catch (IllegalArgumentException invalid) {
+            return ApiResponse.badRequest("Invalid object aggregate");
+        }
+    }
+
     public ApiResponse resume(RequestContext context, SecurityPrincipal principal, String actionName, String actionId) {
         try {
             return ApiResponse.ok(application.resume(context, principal, actionName, actionId));

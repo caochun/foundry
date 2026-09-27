@@ -132,6 +132,18 @@ public final class ApplicationService {
         return new ObjectQueryResult(items, matching.size(), options.offset());
     }
 
+    public AggregateResult aggregateObjects(RequestContext context, SecurityPrincipal principal, String type, AggregateQuery query) {
+        requireContext(context, principal);
+        if (schema == null || !objectTypes.contains(type)) throw new IllegalArgumentException("Aggregate requires a registered object type");
+        var visible = visibleFields(principal, type);
+        var aggregation = new ObjectAggregationPlan(properties.get(type), visible, query);
+        var predicate = new ObjectQueryPlan(schema, properties.get(type), visible).predicate(query.filter());
+        var rows = storage.queryObjects(context, type, query.sourceView()).stream()
+                .filter(object -> authorization.check(context, principal, "viewer", object.key()))
+                .filter(predicate).toList();
+        return aggregation.evaluate(rows);
+    }
+
     private static QueryOptions allRows(QueryOptions options) {
         return new QueryOptions(Integer.MAX_VALUE, 0, options.asOfValidTime(), options.asOfRecordedTime(), options.includeDeleted());
     }

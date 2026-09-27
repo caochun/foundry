@@ -82,10 +82,12 @@ public final class JdkRestServer implements AutoCloseable {
                 response = ApiResponse.notFound();
             }
         } else if ("POST".equalsIgnoreCase(exchange.getRequestMethod())
-                && exchange.getRequestURI().getPath().matches("/api/v1/[^/]+/query")) {
+                && exchange.getRequestURI().getPath().matches("/api/v1/[^/]+/(query|aggregate)")) {
             String type = exchange.getRequestURI().getPath().split("/")[3];
             Map<String, Object> input = mapper.readValue(exchange.getRequestBody(), new com.fasterxml.jackson.core.type.TypeReference<>() {});
-            response = router.query(context.request(), context.principal(), type, ObjectQuery.fromJson(input));
+            response = exchange.getRequestURI().getPath().endsWith("/aggregate")
+                    ? router.aggregate(context.request(), context.principal(), type, AggregateQuery.fromJson(input))
+                    : router.query(context.request(), context.principal(), type, ObjectQuery.fromJson(input));
         } else {
             response = ApiResponse.badRequest("unsupported HTTP method");
         }

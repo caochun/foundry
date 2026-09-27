@@ -146,7 +146,7 @@ final class ObjectQueryPlan {
         return left == null || right == null ? left == right : compare(type, left, right) == 0;
     }
 
-    private static int compare(String type, Object left, Object right) {
+    static int compare(String type, Object left, Object right) {
         return switch (type) {
             case "Int", "Float" -> new BigDecimal(left.toString()).compareTo(new BigDecimal(right.toString()));
             case "Date" -> java.time.LocalDate.parse((String) left).compareTo(java.time.LocalDate.parse((String) right));
