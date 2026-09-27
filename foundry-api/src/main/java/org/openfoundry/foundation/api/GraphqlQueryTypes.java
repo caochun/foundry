@@ -2,7 +2,6 @@ package org.openfoundry.foundation.api;
 
 import graphql.Scalars;
 import graphql.schema.*;
-import org.openfoundry.foundation.spi.QueryOptions;
 import org.openfoundry.foundation.spi.schema.*;
 
 import java.util.HashSet;
@@ -113,22 +112,28 @@ final class GraphqlQueryTypes {
                                                      Map<String, GraphQLInputObjectType> inputs, boolean connection) {
         field.argument(GraphQLArgument.newArgument().name("filter").type(inputs.get(name + "Filter")))
                 .argument(GraphQLArgument.newArgument().name("orderBy").type(inputs.get(name + "OrderBy")))
-                .argument(GraphQLArgument.newArgument().name("first").type(Scalars.GraphQLInt).defaultValue(100))
                 .argument(GraphQLArgument.newArgument().name("offset").type(Scalars.GraphQLInt).defaultValue(0));
-        if (connection) field.argument(GraphQLArgument.newArgument().name("after").type(Scalars.GraphQLString));
+        var first = GraphQLArgument.newArgument().name("first").type(Scalars.GraphQLInt);
+        if (!connection) first.defaultValue(100);
+        field.argument(first);
+        if (connection) {
+            field.argument(GraphQLArgument.newArgument().name("after").type(Scalars.GraphQLString));
+            field.argument(GraphQLArgument.newArgument().name("last").type(Scalars.GraphQLInt));
+            field.argument(GraphQLArgument.newArgument().name("before").type(Scalars.GraphQLString));
+        }
         return field;
     }
 
     static ObjectQuery query(DataFetchingEnvironment env) {
-        Integer first = env.getArgument("first");
-        Integer offset = env.getArgument("offset");
-        String after = env.getArgument("after");
-        int start = offset == null ? 0 : offset;
-        if (after != null) {
-            if (start != 0) throw new IllegalArgumentException("after and offset cannot be combined");
-            start = ObjectQueryResult.offsetAfter(after);
-        }
-        Map<String, Object> filter = env.getArgument("filter");
+        return ObjectQuery.fromJson(queryArguments(env));
+    }
+
+    static ObjectConnectionQuery connectionQuery(DataFetchingEnvironment env) {
+        return ObjectConnectionQuery.fromJson(queryArguments(env));
+    }
+
+    private static Map<String, Object> queryArguments(DataFetchingEnvironment env) {
+        var arguments = new LinkedHashMap<String, Object>(env.getArguments());
         Map<String, String> order = env.getArgument("orderBy");
         // GraphQL input objects are unordered: schema declaration order defines multi-key priority.
         var ordered = new LinkedHashMap<String, String>();
@@ -136,8 +141,8 @@ final class GraphqlQueryTypes {
             var input = (GraphQLInputObjectType) env.getFieldDefinition().getArgument("orderBy").getType();
             for (var field : input.getFieldDefinitions()) if (order.containsKey(field.getName())) ordered.put(field.getName(), order.get(field.getName()));
         }
-        return new ObjectQuery(filter == null ? Map.of() : filter, ordered,
-                new QueryOptions(first == null ? 100 : first, start, null, null, false));
+        arguments.put("orderBy", ordered);
+        return arguments;
     }
 
     static String sdl(OntologySchema schema) {

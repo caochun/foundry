@@ -117,19 +117,32 @@ public final class ApplicationService {
     }
 
     public ObjectQueryResult queryObjects(RequestContext context, SecurityPrincipal principal, String type, ObjectQuery query) {
+        var matching = matchingObjects(context, principal, type, query);
+        var options = query.options();
+        var items = matching.stream().skip(options.offset()).limit(options.limit())
+                .map(object -> project(context, principal, object, options)).toList();
+        return new ObjectQueryResult(items, matching.size(), options.offset());
+    }
+
+    public ObjectQueryResult.Connection queryConnection(RequestContext context, SecurityPrincipal principal, String type, ObjectConnectionQuery query) {
+        var source = query.sourceQuery();
+        var matching = matchingObjects(context, principal, type, source);
+        var window = query.page().window(matching.size());
+        var items = matching.subList(window.start(), window.end()).stream()
+                .map(object -> project(context, principal, object, source.options())).toList();
+        return new ObjectQueryResult(items, matching.size(), window.start()).connection();
+    }
+
+    private List<ObjectRecord> matchingObjects(RequestContext context, SecurityPrincipal principal, String type, ObjectQuery query) {
         requireContext(context, principal);
         if (schema == null || !objectTypes.contains(type)) throw new IllegalArgumentException("Query requires a registered object type");
         var plan = new ObjectQueryPlan(schema, properties.get(type), visibleFields(principal, type));
         var predicate = plan.predicate(query.filter());
         var comparator = plan.comparator(query.orderBy());
-        var options = query.options();
         // One storage read supplies both rows and count. SQL pushdown is a separate optimization.
-        var matching = storage.queryObjects(context, type, allRows(options)).stream()
+        return storage.queryObjects(context, type, allRows(query.options())).stream()
                 .filter(object -> authorization.check(context, principal, "viewer", object.key()))
                 .filter(predicate).sorted(comparator).toList();
-        var items = matching.stream().skip(options.offset()).limit(options.limit())
-                .map(object -> project(context, principal, object, options)).toList();
-        return new ObjectQueryResult(items, matching.size(), options.offset());
     }
 
     public AggregateResult aggregateObjects(RequestContext context, SecurityPrincipal principal, String type, AggregateQuery query) {

@@ -56,6 +56,16 @@ public final class RestApiRouter {
         }
     }
 
+    public ApiResponse query(RequestContext context, SecurityPrincipal principal, String type, ObjectConnectionQuery query) {
+        try {
+            return ApiResponse.ok(application.queryConnection(context, principal, type, query));
+        } catch (SecurityException denied) {
+            return ApiResponse.forbidden();
+        } catch (IllegalArgumentException invalid) {
+            return ApiResponse.badRequest("Invalid object connection query");
+        }
+    }
+
     public ApiResponse aggregate(RequestContext context, SecurityPrincipal principal, String type, AggregateQuery query) {
         try {
             return ApiResponse.ok(application.aggregateObjects(context, principal, type, query));

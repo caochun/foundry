@@ -10,6 +10,12 @@ public final class GraphqlContractGenerator {
     }
 
     public String generate(OntologySchema schema, GraphqlApiRuntime.ActionMode mode) {
+        return generate(schema, mode, GraphqlApiRuntime.QueryMode.CONNECTION);
+    }
+
+    public String generate(OntologySchema schema, GraphqlApiRuntime.ActionMode mode, GraphqlApiRuntime.QueryMode queryMode) {
+        java.util.Objects.requireNonNull(mode);
+        java.util.Objects.requireNonNull(queryMode);
         GraphqlActionTypes.validateNames(schema, mode == GraphqlApiRuntime.ActionMode.TYPED ? schema.actionTypes() : java.util.List.of());
         StringBuilder result = new StringBuilder("scalar JSON\nscalar Date\nscalar DateTime\nscalar Duration\nscalar URI\nscalar GeoPoint\n\n");
         schema.enums().forEach((name, values) -> result.append("enum ").append(name).append(" { ").append(String.join(" ", values)).append(" }\n"));
@@ -42,10 +48,16 @@ public final class GraphqlContractGenerator {
             String singular = lower(object.name());
             result.append("  ").append(singular).append("Aggregate(filter: ").append(object.name())
                     .append("Filter, groupBy: [String!], fields: [AggregateFieldInput!]!, orderBy: [AggregateOrderInput!], limit: Int, offset: Int): AggregateResult!\n");
-            String arguments = "filter: " + object.name() + "Filter, orderBy: " + object.name() + "OrderBy, first: Int = 100, offset: Int = 0";
+            String arguments = "filter: " + object.name() + "Filter, orderBy: " + object.name() + "OrderBy";
+            String connectionArguments = arguments + ", first: Int, after: String, last: Int, before: String, offset: Int = 0";
             result.append("  ").append(singular).append("(id: ID!): ").append(object.name()).append("\n");
-            result.append("  ").append(singular).append("s(").append(arguments).append("): [").append(object.name()).append("!]!\n");
-            result.append("  ").append(singular).append("sConnection(").append(arguments).append(", after: String): ").append(object.name()).append("Connection!\n");
+            if (queryMode == GraphqlApiRuntime.QueryMode.LEGACY_LIST) {
+                result.append("  ").append(singular).append("s(").append(arguments).append(", first: Int = 100, offset: Int = 0): [")
+                        .append(object.name()).append("!]!\n");
+            } else {
+                result.append("  ").append(singular).append("s(").append(connectionArguments).append("): ").append(object.name()).append("Connection!\n");
+            }
+            result.append("  ").append(singular).append("sConnection(").append(connectionArguments).append("): ").append(object.name()).append("Connection!\n");
         }
         result.append("}\n\n");
         if (!schema.actionTypes().isEmpty()) {

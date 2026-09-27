@@ -92,7 +92,7 @@ public final class JdkRestServer implements AutoCloseable {
             response = switch (operation) {
                 case "aggregate" -> router.aggregate(context.request(), context.principal(), type, AggregateQuery.fromJson(input));
                 case "search" -> router.search(context.request(), context.principal(), type, SearchQuery.fromJson(input));
-                default -> router.query(context.request(), context.principal(), type, ObjectQuery.fromJson(input));
+                default -> router.query(context.request(), context.principal(), type, ObjectConnectionQuery.fromJson(input));
             };
         } else {
             response = ApiResponse.badRequest("unsupported HTTP method");

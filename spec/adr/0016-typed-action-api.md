@@ -1,5 +1,7 @@
 # ADR-0016：Schema感知参数与类型化Action API
 
+查询形状的后续迁移见[ADR-0020](0020-connection-pagination.md)：ActionMode只选择动作契约；生成createLegacy对应的旧查询SDL需另传QueryMode.LEGACY_LIST。
+
 状态：Accepted。日期：2026-09-28。
 
 ## 参数

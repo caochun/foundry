@@ -190,7 +190,7 @@ class GovernedObjectQueryTest {
 
     private void graphql(Fixture f) {
         f.denied.add("b");
-        var graph = GraphqlApiRuntime.create(SCHEMA, f.app(Map.of()));
+        var graph = GraphqlApiRuntime.create(SCHEMA, f.app(Map.of()), Map.of(), GraphqlApiRuntime.ActionMode.TYPED, GraphqlApiRuntime.QueryMode.LEGACY_LIST);
         var result = graph.execute(ExecutionInput.newExecutionInput("""
                 query($filter: ItemFilter!) {
                   items(filter: $filter, orderBy: {amount: ASC}) { key name }

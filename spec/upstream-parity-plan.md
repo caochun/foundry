@@ -41,7 +41,8 @@
 - [x] 对象标量/枚举过滤、排序、授权后分页与可见计数；共享REST/GraphQL Connection、隐藏字段查询拒绝及双时间Java/REST读取。
 - [x] 受控COUNT/SUM/AVG/MIN/MAX、分组/组排序/分页及totalGroups；REST/GraphQL聚合和Java/REST双时间统计。
 - [x] 受控文本搜索：显式TERMS/PHRASE上游模式、可见字段评分/高亮/分页及REST/GraphQL入口，Java/REST双时间搜索。
-- [ ] 时间一致的关系API、关系写入声明约束、批量/订阅API、反向分页/结构值筛选、原生存储搜索/聚合/查询下推与跨读取快照。
+- [x] 默认GraphQL复数Connection契约、显式旧列表模式、first/after/last/before/零条查询及授权后双向分页；REST采用同一页模型。
+- [ ] 时间一致的关系API、关系写入声明约束、批量/订阅API、结构值筛选、原生存储搜索/聚合/查询下推与跨读取快照。
 - [ ] 持久Schema Registry、破坏性变化分类、迁移与漂移门禁。
 
 ## F4：可靠同步、事件与交付
@@ -166,3 +167,11 @@ GraphQL默认使用具名Input/Result；旧调用方可以显式选择LEGACY_JSO
 独立探针确认两种Provider一致返回可见命中数2，TERMS首条得分3、PHRASE各1分，隐藏文本不影响得分或高亮。固定上游memory按词计次数、PostgreSQL按整句计字段的差异以显式模式保留；Java默认可见声明文本属性，不按任意运行时字符串兜底。
 
 原生Storage SPI搜索、SQL/索引/授权下推、资源预算及生产规模验收仍待完成；JDK GET的search路径保留规则和其他差异见ADR-0019。Consent/ObjectSet/反向分页及完整覆盖目标继续，未把应用层实现当作所有存储集成完成。
+
+## F3默认Connection与双向分页验证记录
+
+2026-09-28：常规根reactor512项，其中Foundry402项，全部通过，无失败/错误/跳过。新增19项覆盖memory/H2正反向完整遍历、130条隐藏记录、before边界、last单独使用、双游标/空页/零条、默认20/最大100、权限/过滤/排序/历史/租户及REST/GraphQL兼容。
+
+默认GraphQL复数字段现为上游Connection形状，原数组模式明确选择LEGACY_LIST，原Connection后缀保留。独立探针确认末页、边界截断和可见总数，旧数组仍可调用。修复了固定上游last单独使用及before首部未裁剪的缺陷，差异和迁移见ADR-0020。
+
+原生查询/搜索/聚合下推、外部权限一致快照、Consent/ObjectSet及其余核心范围继续，完整目标保持active。运行库与服务JAR未改动。

@@ -32,6 +32,7 @@ public final class GraphqlApiRuntime {
     private GraphqlApiRuntime() {}
 
     public enum ActionMode { TYPED, LEGACY_JSON }
+    public enum QueryMode { CONNECTION, LEGACY_LIST }
 
     public static GraphQL create(OntologySchema schema, ApplicationService application) {
         return create(schema, application, Map.of());
@@ -43,11 +44,18 @@ public final class GraphqlApiRuntime {
     }
 
     public static GraphQL createLegacy(OntologySchema schema, ApplicationService application, Map<String, ActionManifest> manifests) {
-        return create(schema, application, manifests, ActionMode.LEGACY_JSON);
+        return create(schema, application, manifests, ActionMode.LEGACY_JSON, QueryMode.LEGACY_LIST);
     }
 
     public static GraphQL create(OntologySchema schema, ApplicationService application,
                                  Map<String, ActionManifest> manifests, ActionMode actionMode) {
+        return create(schema, application, manifests, actionMode, QueryMode.CONNECTION);
+    }
+
+    public static GraphQL create(OntologySchema schema, ApplicationService application,
+                                 Map<String, ActionManifest> manifests, ActionMode actionMode, QueryMode queryMode) {
+        java.util.Objects.requireNonNull(actionMode);
+        java.util.Objects.requireNonNull(queryMode);
         var declared = schema.actionTypes().stream().collect(java.util.stream.Collectors.toMap(type -> type.name(), type -> type));
         var active = manifests.keySet().stream().sorted().map(name -> {
             var type = declared.get(name);
@@ -107,22 +115,23 @@ public final class GraphqlApiRuntime {
                         String id = env.getArgument("id");
                         return application.getObject(request.request(), request.principal(), definition.name(), id);
                     }).build());
-            query.field(GraphqlQueryTypes.arguments(GraphQLFieldDefinition.newFieldDefinition().name(singular + "s")
-                    .type(GraphQLNonNull.nonNull(GraphQLList.list(GraphQLNonNull.nonNull(type)))), definition.name(), queryInputs, false)
-                    .dataFetcher(env -> {
-                        var request = request(env);
-                        var input = GraphqlQueryTypes.query(env);
-                        if (input.filter().isEmpty() && input.orderBy().isEmpty()) {
-                            return application.listObjects(request.request(), request.principal(), definition.name(), input.options());
-                        }
-                        return application.queryObjects(request.request(), request.principal(), definition.name(), input).items();
-                    }).build());
-            query.field(GraphqlQueryTypes.arguments(GraphQLFieldDefinition.newFieldDefinition().name(singular + "sConnection")
-                    .type(GraphQLNonNull.nonNull(GraphqlQueryTypes.connection(type, pageInfo))), definition.name(), queryInputs, true)
-                    .dataFetcher(env -> {
-                        var request = request(env);
-                        return application.queryObjects(request.request(), request.principal(), definition.name(), GraphqlQueryTypes.query(env)).connection();
-                    }).build());
+            var connection = GraphqlQueryTypes.connection(type, pageInfo);
+            if (queryMode == QueryMode.LEGACY_LIST) {
+                query.field(GraphqlQueryTypes.arguments(GraphQLFieldDefinition.newFieldDefinition().name(singular + "s")
+                        .type(GraphQLNonNull.nonNull(GraphQLList.list(GraphQLNonNull.nonNull(type)))), definition.name(), queryInputs, false)
+                        .dataFetcher(env -> {
+                            var request = request(env);
+                            var input = GraphqlQueryTypes.query(env);
+                            if (input.filter().isEmpty() && input.orderBy().isEmpty()) {
+                                return application.listObjects(request.request(), request.principal(), definition.name(), input.options());
+                            }
+                            return application.queryObjects(request.request(), request.principal(), definition.name(), input).items();
+                        }).build());
+            } else {
+                query.field(connectionField(singular + "s", definition.name(), connection, queryInputs, application));
+            }
+            // Keep the previously published Connection suffix as an equivalent alias.
+            query.field(connectionField(singular + "sConnection", definition.name(), connection, queryInputs, application));
         }
 
         graphql.schema.GraphQLObjectType.Builder mutation = GraphQLObjectType.newObject().name("Mutation");
@@ -159,6 +168,15 @@ public final class GraphqlApiRuntime {
         graphQLSchema.additionalTypes(new java.util.HashSet<>(enums.values()));
         graphQLSchema.additionalTypes(new java.util.HashSet<>(linkTypes.values()));
         return GraphQL.newGraphQL(graphQLSchema.build()).build();
+    }
+
+    private static GraphQLFieldDefinition connectionField(String name, String type, GraphQLObjectType connection,
+                                                          Map<String, graphql.schema.GraphQLInputObjectType> inputs, ApplicationService application) {
+        return GraphqlQueryTypes.arguments(GraphQLFieldDefinition.newFieldDefinition().name(name)
+                .type(GraphQLNonNull.nonNull(connection)), type, inputs, true).dataFetcher(env -> {
+            var request = request(env);
+            return application.queryConnection(request.request(), request.principal(), type, GraphqlQueryTypes.connectionQuery(env));
+        }).build();
     }
 
     private static ApiRequestContext request(DataFetchingEnvironment environment) {
