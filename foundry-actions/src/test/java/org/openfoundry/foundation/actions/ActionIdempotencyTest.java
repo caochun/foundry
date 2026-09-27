@@ -63,7 +63,7 @@ class ActionIdempotencyTest {
         executor.execute(manifest, definition, context, actor, Map.of(), "key", storage);
         allowed.set(false);
         assertThrows(SecurityException.class, () -> executor.execute(manifest, definition, context, actor, Map.of(), "key", storage));
-        assertEquals(2, checks.get());
+        assertEquals(3, checks.get(), "Initial execution rechecks inside the transaction; replay is rejected before lookup");
         assertEquals(1, storage.auditEntries(context).size());
     }
 
@@ -74,9 +74,9 @@ class ActionIdempotencyTest {
         var executor = new ActionExecutor().withAuthorization((c, a, d, p) -> true);
         assertThrows(SecurityException.class, () -> executor.execute(manifest, new ActionTypeDefinition("Noop", List.of()), context, actor, Map.of(), storage));
         assertThrows(SecurityException.class, () -> executor.execute(manifest, definition, RequestContext.system("tenant", "someone-else"), actor, Map.of(), storage));
-        assertThrows(IllegalStateException.class, () -> executor.execute(manifest, definition, context, actor, Map.of(), "key", storage));
+        assertTrue(executor.execute(manifest, definition, context, actor, Map.of(), "key", storage).success());
         assertThrows(IllegalArgumentException.class, () -> executor.execute(manifest, definition, context, actor, Map.of(), " ", storage));
-        assertTrue(storage.auditEntries(context).isEmpty());
+        assertEquals(1, storage.auditEntries(context).size());
     }
 
     @Test

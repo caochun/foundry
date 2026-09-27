@@ -122,6 +122,15 @@ public interface DatabaseDialect {
                 );
                 CREATE INDEX IF NOT EXISTS idx_of_outbox_pending
                   ON of_outbox_events (tenant_id, published_at, occurred_at);
+                CREATE TABLE IF NOT EXISTS of_command_receipts (
+                  tenant_id VARCHAR(255) NOT NULL,
+                  receipt_key VARCHAR(64) NOT NULL,
+                  actor_id VARCHAR(255) NOT NULL,
+                  action_name VARCHAR(255) NOT NULL,
+                  request_hash VARCHAR(64) NOT NULL,
+                  result_json %s NOT NULL,
+                  PRIMARY KEY (tenant_id, receipt_key)
+                );
                 CREATE TABLE IF NOT EXISTS of_consumed_events (
                   event_id VARCHAR(255) PRIMARY KEY,
                   consumed_at %s NOT NULL
@@ -130,7 +139,7 @@ public interface DatabaseDialect {
                         timestamp, timestamp, timestamp, text,
                         timestamp, timestamp, timestamp, timestamp, timestamp, text,
                         timestamp, timestamp, timestamp, text,
-                        timestamp, text, timestamp, text, timestamp, timestamp);
+                        timestamp, text, timestamp, text, timestamp, text, timestamp);
     }
 
     static DatabaseDialect h2() {

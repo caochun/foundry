@@ -40,7 +40,7 @@ import java.util.UUID;
  */
 public final class InMemoryStorageProvider implements StorageProvider {
     private static final StorageCapabilities CAPABILITIES = new StorageCapabilities(
-            true, true, false, false, false, true, false);
+            true, true, false, false, false, true, false, true);
 
     private final Object monitor = new Object();
     private final Clock clock;
@@ -450,6 +450,39 @@ public final class InMemoryStorageProvider implements StorageProvider {
         }
 
         @Override
+        public void acquireWrite() {
+            assertOpen();
+        }
+
+        @Override
+        public ObjectRecord getObject(String type, String id) {
+            assertOpen();
+            return working.objects.get(objectKey(context, type, id));
+        }
+
+        @Override
+        public LinkRecord getLink(String type, String id) {
+            assertOpen();
+            return working.links.get(linkKey(context, type, id));
+        }
+
+        @Override
+        public org.openfoundry.foundation.spi.CommandReceipt getCommandReceipt(String key) {
+            assertOpen();
+            var receipt = working.receipts.get(objectKey(context, "__command_receipt", key));
+            if (receipt != null && !receipt.actorId().equals(context.actorId())) throw new SecurityException("Command receipt belongs to another actor");
+            return receipt;
+        }
+
+        @Override
+        public void putCommandReceipt(org.openfoundry.foundation.spi.CommandReceipt receipt) {
+            assertOpen();
+            if (!receipt.actorId().equals(context.actorId())) throw new SecurityException("Command receipt actor mismatch");
+            String key = objectKey(context, "__command_receipt", receipt.key());
+            if (working.receipts.putIfAbsent(key, receipt) != null) throw new IllegalStateException("Command receipt already exists");
+        }
+
+        @Override
         public void appendAudit(AuditEntry audit) {
             assertOpen();
             if (!audit.tenantId().equals(context.tenantId())) throw new IllegalArgumentException("audit tenant mismatch");
@@ -474,7 +507,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
             assertOpen();
             synchronized (monitor) {
                 if (revision != baseRevision) {
-                    throw new IllegalStateException("transaction conflict: storage changed during transaction");
+                    throw new org.openfoundry.foundation.spi.TransactionConflictException("transaction conflict: storage changed during transaction");
                 }
                 state = working;
                 revision++;
@@ -611,26 +644,28 @@ public final class InMemoryStorageProvider implements StorageProvider {
         private final Map<String, List<HistorySnapshot>> history;
         private final List<AuditEntry> audits;
         private final List<OutboxEntry> outbox;
+        private final Map<String, org.openfoundry.foundation.spi.CommandReceipt> receipts;
 
         private State() {
-            this(new HashMap<>(), new HashMap<>(), new HashMap<>(), new ArrayList<>(), new ArrayList<>());
+            this(new HashMap<>(), new HashMap<>(), new HashMap<>(), new ArrayList<>(), new ArrayList<>(), new HashMap<>());
         }
 
         private State(Map<String, ObjectRecord> objects, Map<String, LinkRecord> links,
                       Map<String, List<HistorySnapshot>> history, List<AuditEntry> audits,
-                      List<OutboxEntry> outbox) {
+                      List<OutboxEntry> outbox, Map<String, org.openfoundry.foundation.spi.CommandReceipt> receipts) {
             this.objects = objects;
             this.links = links;
             this.history = history;
             this.audits = audits;
             this.outbox = outbox;
+            this.receipts = receipts;
         }
 
         private State copy() {
             Map<String, List<HistorySnapshot>> copiedHistory = new HashMap<>();
             history.forEach((key, value) -> copiedHistory.put(key, new ArrayList<>(value)));
             return new State(new HashMap<>(objects), new HashMap<>(links), copiedHistory,
-                    new ArrayList<>(audits), new ArrayList<>(outbox));
+                    new ArrayList<>(audits), new ArrayList<>(outbox), new HashMap<>(receipts));
         }
     }
 }

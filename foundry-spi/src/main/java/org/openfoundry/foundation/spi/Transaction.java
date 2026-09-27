@@ -46,6 +46,27 @@ public interface Transaction extends AutoCloseable {
         throw new UnsupportedOperationException("Explicit effective time is not supported by this provider");
     }
 
+    /** Establish the provider's write consistency boundary before evaluating a governed command. */
+    default void acquireWrite() {
+        throw new UnsupportedOperationException("Transactional command execution is not supported");
+    }
+
+    default ObjectRecord getObject(String type, String id) {
+        throw new UnsupportedOperationException("Transactional reads are not supported");
+    }
+
+    default LinkRecord getLink(String type, String id) {
+        throw new UnsupportedOperationException("Transactional reads are not supported");
+    }
+
+    default CommandReceipt getCommandReceipt(String key) {
+        throw new UnsupportedOperationException("Transactional command receipts are not supported");
+    }
+
+    default void putCommandReceipt(CommandReceipt receipt) {
+        throw new UnsupportedOperationException("Transactional command receipts are not supported");
+    }
+
     void appendAudit(AuditEntry audit);
 
     void enqueueOutbox(OutboxEntry event);

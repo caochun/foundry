@@ -12,6 +12,8 @@
 
 - [ADR-0006](adr/0006-property-validation-and-write-serialization.md)：属性约束、事务唯一性和并发写入；[升级说明](property-validation-migration.md)。
 
+- [ADR-0007](adr/0007-transactional-command-receipts.md)：[事务命令回执](command-receipts.md)、持久幂等与故障恢复。
+
 ## 阅读顺序
 
 1. [constitution.md](constitution.md)：不可违背的设计原则和范围边界。

@@ -47,7 +47,7 @@ import java.util.UUID;
 public final class JdbcStorageProvider implements StorageProvider, AutoCloseable {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
     private static final StorageCapabilities CAPABILITIES = new StorageCapabilities(
-            true, true, false, false, false, true, false);
+            true, true, false, false, false, true, false, true);
 
     private final DataSource dataSource;
     private final Clock clock;
@@ -282,6 +282,8 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         initializeWriteGuard(context);
         try {
             Connection connection = dataSource.getConnection();
+            // After waiting on the tenant row, subsequent reads must see the previous writer's commit.
+            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
             connection.setAutoCommit(false);
             return new JdbcTransaction(context, connection);
         } catch (SQLException exception) {
@@ -691,6 +693,53 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                         effective, null, now, existing.properties());
                 uniqueProperties.applied(schema, "link", type, requireLinkType(type).properties(), id, existing.properties(), null);
             } catch (SQLException exception) { throw sqlError("delete link", exception); }
+        }
+
+        @Override
+        public void acquireWrite() {
+            assertOpen();
+            lockWrites();
+        }
+
+        @Override
+        public ObjectRecord getObject(String type, String id) {
+            assertOpen();
+            return findObject(type, id);
+        }
+
+        @Override
+        public LinkRecord getLink(String type, String id) {
+            assertOpen();
+            return findLink(type, id);
+        }
+
+        @Override
+        public org.openfoundry.foundation.spi.CommandReceipt getCommandReceipt(String key) {
+            acquireWrite();
+            try (var statement = connection.prepareStatement("SELECT actor_id, action_name, request_hash, result_json FROM of_command_receipts WHERE tenant_id = ? AND receipt_key = ?")) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, key);
+                try (var row = statement.executeQuery()) {
+                    if (!row.next()) return null;
+                    if (!row.getString(1).equals(context.actorId())) throw new SecurityException("Command receipt belongs to another actor");
+                    return new org.openfoundry.foundation.spi.CommandReceipt(key, row.getString(1), row.getString(2), row.getString(3), jsonMap(row.getString(4)));
+                }
+            } catch (SQLException failure) { throw sqlError("read command receipt", failure); }
+        }
+
+        @Override
+        public void putCommandReceipt(org.openfoundry.foundation.spi.CommandReceipt receipt) {
+            acquireWrite();
+            if (!receipt.actorId().equals(context.actorId())) throw new SecurityException("Command receipt actor mismatch");
+            try (var statement = connection.prepareStatement("INSERT INTO of_command_receipts (tenant_id, receipt_key, actor_id, action_name, request_hash, result_json) VALUES (?, ?, ?, ?, ?, ?)")) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, receipt.key());
+                statement.setString(3, receipt.actorId());
+                statement.setString(4, receipt.action());
+                statement.setString(5, receipt.requestHash());
+                statement.setString(6, json(receipt.result()));
+                statement.executeUpdate();
+            } catch (SQLException failure) { throw sqlError("write command receipt", failure); }
         }
 
         @Override

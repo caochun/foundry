@@ -178,6 +178,39 @@ class GovernedBoundaryTest {
     }
 
     @Test
+    void jdbcLinkAuthorizationAndReceiptReplayWorkWithASingleConnectionPool() {
+        var pool = org.h2.jdbcx.JdbcConnectionPool.create("jdbc:h2:mem:api_receipt_single", "sa", "");
+        pool.setMaxConnections(1);
+        pool.setLoginTimeout(1);
+        try {
+            var schema = new OdlParser().parse("""
+                    extend schema @namespace(name: "receipt", version: "0.1.0")
+                    type Item @objectType { id: ID! @primary }
+                    type Related @linkType(from: "Item", to: "Item", cardinality: MANY_TO_MANY) { id: ID! @primary }
+                    type Unlink @actionType(permission: "can_unlink") { linkId: ID! @param }
+                    """);
+            var storage = new org.openfoundry.foundation.storage.jdbc.JdbcStorageProvider(pool,
+                    org.openfoundry.foundation.storage.jdbc.DatabaseDialect.h2());
+            storage.applySchema(CONTEXT, schema);
+            try (var tx = storage.beginTransaction(CONTEXT)) {
+                var a = tx.createObject("Item", "a", Map.of());
+                var b = tx.createObject("Item", "b", Map.of());
+                tx.createLink("Related", "edge", a.key(), b.key(), Map.of());
+                tx.commit();
+            }
+            var manifest = new ActionManifest("Unlink", 1, false, List.of(), List.of(new ActionManifest.DeleteLink("Related", "params.linkId")));
+            var app = new ApplicationService(storage, new AuthorizationService((p, r, e) -> true), new ActionExecutor(),
+                    schema, Map.of("Unlink", manifest), Map.of());
+            var first = app.execute(manifest, CONTEXT, PRINCIPAL, Map.of("linkId", "edge"), "single");
+            assertEquals(first, app.execute(manifest, CONTEXT, PRINCIPAL, Map.of("linkId", "edge"), "single"));
+            assertTrue(storage.getLink(CONTEXT, "Related", "edge").isDeleted());
+            assertEquals(2, storage.getLink(CONTEXT, "Related", "edge").version());
+        } finally {
+            pool.dispose();
+        }
+    }
+
+    @Test
     void restAndGraphqlMutationUseTheSameGovernedBoundary() throws Exception {
         var storage = storage();
         var allow = new AtomicBoolean(false);

@@ -75,16 +75,100 @@ public final class ActionExecutor {
         if (idempotencyKey != null) {
             if (idempotencyKey.isBlank()) throw new IllegalArgumentException("Idempotency key must not be blank");
             if (idempotencyKey.length() > 512) throw new IllegalArgumentException("Idempotency key too long");
-            if (idempotencyStore == null) throw new IllegalStateException("An idempotency store is required for keyed execution");
             String scoped = ActionFingerprint.hash(List.of(context.tenantId(), actor.id(), manifest.action(), idempotencyKey));
             String fingerprint = ActionFingerprint.hash(List.of(manifest, definition, parameters));
+            if (storage.capabilities().transactionalCommandReceipts()) {
+                return executeTransactional(manifest, definition, context, actor, parameters, storage, scoped, fingerprint);
+            }
+            if (idempotencyStore == null) throw new IllegalStateException("An idempotency store is required for keyed execution");
             return idempotencyStore.execute(scoped, fingerprint, () -> executeEffects(manifest, context, actor, parameters, storage));
+        }
+        if (storage.capabilities().transactionalCommandReceipts()) {
+            return executeTransactional(manifest, definition, context, actor, parameters, storage, null, null);
         }
         return executeEffects(manifest, context, actor, parameters, storage);
     }
 
+    private ActionResult executeTransactional(ActionManifest manifest, ActionTypeDefinition definition, RequestContext context,
+                                               ActionActor actor, Map<String, Object> parameters, StorageProvider storage,
+                                               String key, String fingerprint) {
+        for (int attempt = 0; attempt < 8; attempt++) {
+            try (Transaction transaction = storage.beginTransaction(context)) {
+                transaction.acquireWrite();
+                var current = new java.util.LinkedHashMap<String, Object>();
+                parameters.forEach((name, value) -> current.put(name, refresh(transaction, value)));
+                var resolved = java.util.Collections.unmodifiableMap(current);
+                if (!authorizer.allowed(context, actor, definition, resolved, transaction)) throw new SecurityException("Action denied");
+                var receipt = key == null ? null : transaction.getCommandReceipt(key);
+                if (receipt != null) {
+                    if (!receipt.action().equals(manifest.action()) || !receipt.requestHash().equals(fingerprint)) {
+                        throw new IllegalArgumentException("Idempotency key belongs to a different request or configuration");
+                    }
+                    return decodeResult(receipt.result());
+                }
+                parameters.forEach((name, value) -> checkReferenceVersions(value, resolved.get(name)));
+                ActionResult result = applyEffects(manifest, context, actor, resolved, storage, transaction, true);
+                if (!result.success()) return result;
+                if (key != null) {
+                    transaction.putCommandReceipt(new org.openfoundry.foundation.spi.CommandReceipt(key, actor.id(), manifest.action(), fingerprint,
+                            Map.of("format", 1, "success", true, "actionId", result.actionId(), "affected", result.affected().stream()
+                                    .map(entity -> Map.of("type", entity.type(), "id", entity.id())).toList())));
+                }
+                transaction.commit();
+                return result;
+            } catch (org.openfoundry.foundation.spi.TransactionConflictException conflict) {
+                if (attempt == 7) throw conflict;
+            }
+        }
+        throw new IllegalStateException("Transaction retry limit reached");
+    }
+
+    private static Object refresh(Transaction transaction, Object value) {
+        if (value instanceof ObjectRecord original) {
+            var current = transaction.getObject(original.type(), original.id());
+            if (current == null || current.isDeleted()) throw new SecurityException("Object reference is no longer available");
+            return current;
+        }
+        if (value instanceof List<?> list) return list.stream().map(item -> refresh(transaction, item)).toList();
+        return value;
+    }
+
+    private static void checkReferenceVersions(Object original, Object current) {
+        if (original instanceof ObjectRecord before && current instanceof ObjectRecord after && before.version() != after.version()) {
+            throw new IllegalStateException("Action reference version changed; resolve the request again");
+        }
+        if (original instanceof List<?> before && current instanceof List<?> after) {
+            for (int i = 0; i < before.size(); i++) checkReferenceVersions(before.get(i), after.get(i));
+        }
+    }
+
+    private static ActionResult decodeResult(Map<String, Object> stored) {
+        if (!(stored.get("format") instanceof Integer || stored.get("format") instanceof Long)
+                || ((Number) stored.get("format")).longValue() != 1
+                || !Boolean.TRUE.equals(stored.get("success")) || !(stored.get("actionId") instanceof String actionId) || actionId.isBlank()
+                || !(stored.get("affected") instanceof List<?> rows)) throw new IllegalStateException("Unsupported command receipt result");
+        var affected = new ArrayList<EntityKey>();
+        for (Object row : rows) {
+            if (!(row instanceof Map<?, ?> fields) || !(fields.get("type") instanceof String type) || !(fields.get("id") instanceof String id)) {
+                throw new IllegalStateException("Invalid command receipt entity reference");
+            }
+            affected.add(new EntityKey(type, id));
+        }
+        return new ActionResult(true, actionId, affected);
+    }
+
     private ActionResult executeEffects(ActionManifest manifest, RequestContext context, ActionActor actor,
                                         Map<String, Object> parameters, StorageProvider storage) {
+        try (Transaction transaction = storage.beginTransaction(context)) {
+            ActionResult result = applyEffects(manifest, context, actor, parameters, storage, transaction, false);
+            if (result.success()) transaction.commit();
+            return result;
+        }
+    }
+
+    private ActionResult applyEffects(ActionManifest manifest, RequestContext context, ActionActor actor,
+                                      Map<String, Object> parameters, StorageProvider storage, Transaction transaction,
+                                      boolean transactional) {
         String actionId = "act_" + UUID.randomUUID();
         for (ActionManifest.Precondition precondition : manifest.preconditions()) {
             if (!evaluator.evaluate(precondition.expression(), parameters, actor)) {
@@ -94,44 +178,41 @@ public final class ActionExecutor {
         }
 
         List<EntityKey> affected = new ArrayList<>();
-        try (Transaction transaction = storage.beginTransaction(context)) {
-            for (ActionManifest.ActionEffect effect : manifest.effects()) {
-                if (effect instanceof ActionManifest.UpdateObject update) {
-                    ObjectRecord target = object(parameters, update.target());
-                    Map<String, Object> values = resolveMap(update.set(), parameters);
-                    transaction.updateObject(target.type(), target.id(), values, target.version());
-                    affected.add(target.key());
-                } else if (effect instanceof ActionManifest.CreateObject create) {
-                    Map<String, Object> values = resolveMap(create.properties(), parameters);
-                    ObjectRecord created = transaction.createObject(create.objectType(), resolveId(create.target(), parameters), values);
-                    affected.add(created.key());
-                } else if (effect instanceof ActionManifest.CreateLink create) {
-                    EntityKey from = entity(parameters, create.from());
-                    EntityKey to = entity(parameters, create.to());
-                    LinkRecord link = transaction.createLink(create.linkType(), resolveId(create.linkType(), parameters), from, to,
-                            resolveMap(create.properties(), parameters));
-                    affected.add(new EntityKey(link.type(), link.id()));
-                } else if (effect instanceof ActionManifest.DeleteLink delete) {
-                    String linkId = String.valueOf(resolveValue(delete.linkId(), parameters));
-                    transaction.deleteLink(delete.linkType(), linkId, currentLinkVersion(storage, context,
-                            new ActionManifest.DeleteLink(delete.linkType(), linkId)));
-                    affected.add(new EntityKey(delete.linkType(), linkId));
-                }
+        for (ActionManifest.ActionEffect effect : manifest.effects()) {
+            if (effect instanceof ActionManifest.UpdateObject update) {
+                ObjectRecord target = object(parameters, update.target());
+                if (transactional) target = transaction.getObject(target.type(), target.id());
+                Map<String, Object> values = resolveMap(update.set(), parameters);
+                transaction.updateObject(target.type(), target.id(), values, target.version());
+                affected.add(target.key());
+            } else if (effect instanceof ActionManifest.CreateObject create) {
+                Map<String, Object> values = resolveMap(create.properties(), parameters);
+                ObjectRecord created = transaction.createObject(create.objectType(), resolveId(create.target(), parameters), values);
+                affected.add(created.key());
+            } else if (effect instanceof ActionManifest.CreateLink create) {
+                EntityKey from = entity(parameters, create.from());
+                EntityKey to = entity(parameters, create.to());
+                LinkRecord link = transaction.createLink(create.linkType(), resolveId(create.linkType(), parameters), from, to,
+                        resolveMap(create.properties(), parameters));
+                affected.add(new EntityKey(link.type(), link.id()));
+            } else if (effect instanceof ActionManifest.DeleteLink delete) {
+                String linkId = String.valueOf(resolveValue(delete.linkId(), parameters));
+                transaction.deleteLink(delete.linkType(), linkId, transactional ? transaction.getLink(delete.linkType(), linkId).version() : currentLinkVersion(storage, context,
+                        new ActionManifest.DeleteLink(delete.linkType(), linkId)));
+                affected.add(new EntityKey(delete.linkType(), linkId));
             }
-            Map<String, Object> detail = Map.of(
-                    "action", manifest.action(),
-                    "affected", affected.stream().map(key -> key.type() + "/" + key.id()).toList());
-            transaction.appendAudit(new AuditEntry(
-                    "audit_" + actionId, Instant.now(), context.tenantId(), actor.id(),
-                    "action", null, null, manifest.action(), transaction.transactionId(),
-                    "success", detail));
-            transaction.enqueueOutbox(new OutboxEntry(
-                    "event_" + actionId, context.tenantId(), "openfoundry.action.completed",
-                    manifest.action() + "/" + actionId, Instant.now(), transaction.transactionId(), detail));
-            transaction.commit();
         }
-        ActionResult result = new ActionResult(true, actionId, affected);
-        return result;
+        Map<String, Object> detail = Map.of(
+                "action", manifest.action(),
+                "affected", affected.stream().map(key -> key.type() + "/" + key.id()).toList());
+        transaction.appendAudit(new AuditEntry(
+                "audit_" + actionId, Instant.now(), context.tenantId(), actor.id(),
+                "action", null, null, manifest.action(), transaction.transactionId(),
+                "success", detail));
+        transaction.enqueueOutbox(new OutboxEntry(
+                "event_" + actionId, context.tenantId(), "openfoundry.action.completed",
+                manifest.action() + "/" + actionId, Instant.now(), transaction.transactionId(), detail));
+        return new ActionResult(true, actionId, affected);
     }
 
     public ActionBatchResult executeBatch(List<ActionInvocation> invocations,

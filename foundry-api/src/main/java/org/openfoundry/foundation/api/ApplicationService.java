@@ -96,12 +96,26 @@ public final class ApplicationService {
             Object value = parameters.get(parameter.name());
             resolved.put(parameter.name(), resolve(context, parameter.type(), value));
         }
-        return actions.withAuthorization((ctx, actor, type, values) ->
-                authorization.check(ctx, principal, type.permission(), new EntityKey("ActionType", type.name()))
+        ActionAuthorizer policy = new ActionAuthorizer() {
+            @Override
+            public boolean allowed(RequestContext ctx, ActionActor actor, ActionTypeDefinition type, Map<String, Object> values) {
+                return check(ctx, type, values, null);
+            }
+
+            @Override
+            public boolean allowed(RequestContext ctx, ActionActor actor, ActionTypeDefinition type,
+                                   Map<String, Object> values, Transaction transaction) {
+                return check(ctx, type, values, transaction);
+            }
+
+            private boolean check(RequestContext ctx, ActionTypeDefinition type, Map<String, Object> values, Transaction transaction) {
+                return authorization.check(ctx, principal, type.permission(), new EntityKey("ActionType", type.name()))
                         && permittedReferences(ctx, principal, type.permission(), values.values())
-                        && permittedDeletions(ctx, principal, type.permission(), registered, values))
-                .execute(registered, definition, context, new ActionActor(principal.id(), principal.roles()),
-                        Collections.unmodifiableMap(resolved), idempotencyKey, storage);
+                        && permittedDeletions(ctx, principal, type.permission(), registered, values, transaction);
+            }
+        };
+        return actions.withAuthorization(policy).execute(registered, definition, context, new ActionActor(principal.id(), principal.roles()),
+                Collections.unmodifiableMap(resolved), idempotencyKey, storage);
     }
 
     private Object resolve(RequestContext context, String type, Object value) {
@@ -130,13 +144,13 @@ public final class ApplicationService {
     }
 
     private boolean permittedDeletions(RequestContext context, SecurityPrincipal principal, String permission,
-                                       ActionManifest manifest, Map<String, Object> parameters) {
+                                       ActionManifest manifest, Map<String, Object> parameters, Transaction transaction) {
         for (var effect : manifest.effects()) {
             if (effect instanceof ActionManifest.DeleteLink deletion) {
                 String reference = deletion.linkId();
                 Object value = reference.startsWith("params.") ? parameters.get(reference.substring(7)) : reference;
                 if (!(value instanceof String id)) return false;
-                var link = storage.getLink(context, deletion.linkType(), id);
+                var link = transaction == null ? storage.getLink(context, deletion.linkType(), id) : transaction.getLink(deletion.linkType(), id);
                 if (link == null
                         || !authorization.check(context, principal, permission, new EntityKey(link.type(), link.id()))
                         || !authorization.check(context, principal, permission, link.from())
