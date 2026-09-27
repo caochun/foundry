@@ -15,6 +15,11 @@
 
     <dependencies>
         <dependency>
+            <groupId>org.openfoundry</groupId>
+            <artifactId>foundry-validation</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
             <groupId>com.graphql-java</groupId>
             <artifactId>graphql-java</artifactId>
             <version>22.3</version>

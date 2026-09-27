@@ -34,17 +34,25 @@ public final class GraphqlApiRuntime {
 
     public static GraphQL create(OntologySchema schema, ApplicationService application,
                                  Map<String, ActionManifest> manifests) {
+        Map<String, graphql.schema.GraphQLEnumType> enums = new java.util.LinkedHashMap<>();
+        schema.enums().forEach((name, values) -> {
+            var enumeration = graphql.schema.GraphQLEnumType.newEnum().name(name);
+            values.forEach(value -> enumeration.value(value, value));
+            enums.put(name, enumeration.build());
+        });
+        Map<String, graphql.schema.GraphQLInterfaceType> interfaces = new java.util.LinkedHashMap<>();
+        for (var definition : schema.interfaces()) {
+            var iface = graphql.schema.GraphQLInterfaceType.newInterface().name(definition.name())
+                    .typeResolver(environment -> environment.getSchema().getObjectType(((ObjectRecord) environment.getObject()).type()));
+            definition.interfaces().forEach(name -> iface.withInterface(graphql.schema.GraphQLTypeReference.typeRef(name)));
+            definition.properties().forEach(property -> iface.field(field(property, enums)));
+            interfaces.put(definition.name(), iface.build());
+        }
         Map<String, GraphQLObjectType> objectTypes = new java.util.LinkedHashMap<>();
         for (ObjectTypeDefinition definition : schema.objectTypes()) {
             GraphQLObjectType.Builder object = GraphQLObjectType.newObject().name(definition.name());
-            object.field(GraphQLFieldDefinition.newFieldDefinition().name("id").type(Scalars.GraphQLID).build());
-            for (PropertyDefinition property : definition.properties()) {
-                if (property.primary()) continue;
-                GraphQLOutputType type = scalar(property.type());
-                // Protected fields may be absent even when the stored value is required.
-                object.field(GraphQLFieldDefinition.newFieldDefinition().name(property.name()).type(type)
-                        .dataFetcher(env -> ((ObjectRecord) env.getSource()).properties().get(property.name())).build());
-            }
+            definition.interfaces().forEach(name -> object.withInterface(interfaces.get(name)));
+            definition.properties().forEach(property -> object.field(field(property, enums)));
             objectTypes.put(definition.name(), object.build());
         }
 
@@ -93,6 +101,8 @@ public final class GraphqlApiRuntime {
         }
         GraphQLSchema.Builder graphQLSchema = GraphQLSchema.newSchema().query(query.build());
         if (!manifests.isEmpty()) graphQLSchema.mutation(mutation.build());
+        graphQLSchema.additionalTypes(new java.util.HashSet<>(interfaces.values()));
+        graphQLSchema.additionalTypes(new java.util.HashSet<>(enums.values()));
         return GraphQL.newGraphQL(graphQLSchema.build()).build();
     }
 
@@ -102,7 +112,20 @@ public final class GraphqlApiRuntime {
         return request;
     }
 
-    private static GraphQLOutputType scalar(String type) {
+    private static GraphQLFieldDefinition field(PropertyDefinition property, Map<String, graphql.schema.GraphQLEnumType> enums) {
+        GraphQLOutputType type = scalar(property.type(), enums);
+        if (property.primary()) type = GraphQLNonNull.nonNull(type);
+        return GraphQLFieldDefinition.newFieldDefinition().name(property.name()).type(type).dataFetcher(environment -> {
+            ObjectRecord record = environment.getSource();
+            return property.primary() ? record.id() : record.properties().get(property.name());
+        }).build();
+    }
+
+    private static GraphQLOutputType scalar(String type, Map<String, graphql.schema.GraphQLEnumType> enums) {
+        if (type.endsWith("!")) return GraphQLNonNull.nonNull(scalar(type.substring(0, type.length() - 1), enums));
+        if (type.startsWith("[") && type.endsWith("]")) return GraphQLList.list(scalar(type.substring(1, type.length() - 1), enums));
+        if (enums.containsKey(type)) return enums.get(type);
+        if (GraphqlValueScalars.TYPES.containsKey(type)) return GraphqlValueScalars.TYPES.get(type);
         return switch (type) {
             case "ID" -> Scalars.GraphQLID;
             case "Int" -> Scalars.GraphQLInt;

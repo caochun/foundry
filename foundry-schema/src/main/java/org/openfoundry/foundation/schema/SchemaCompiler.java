@@ -38,6 +38,11 @@ public final class SchemaCompiler {
 
     public List<String> validate(OntologySchema schema) {
         List<String> issues = new ArrayList<>();
+        try {
+            new org.openfoundry.foundation.validation.PropertyValidator().validateSchema(schema);
+        } catch (IllegalArgumentException invalid) {
+            issues.add(invalid.getMessage());
+        }
         Set<String> objectNames = new HashSet<>();
         Set<String> linkNames = new HashSet<>();
         Set<String> actionNames = new HashSet<>();
@@ -76,7 +81,7 @@ public final class SchemaCompiler {
         }
 
         Set<String> allNames = new HashSet<>();
-        for (String name : java.util.stream.Stream.of(objectNames, linkNames, actionNames, schema.enums().keySet()).flatMap(Set::stream).toList()) {
+        for (String name : java.util.stream.Stream.of(objectNames, linkNames, actionNames, schema.enums().keySet(), schema.interfaces().stream().map(org.openfoundry.foundation.spi.schema.InterfaceDefinition::name).collect(java.util.stream.Collectors.toSet())).flatMap(Set::stream).toList()) {
             if (!allNames.add(name)) issues.add("type name reused across kinds: " + name);
         }
         schema.enums().forEach((name, values) -> {
@@ -124,14 +129,16 @@ public final class SchemaCompiler {
     private static String canonical(OntologySchema schema) {
         StringBuilder result = new StringBuilder()
                 .append(schema.namespace()).append('|').append(schema.version());
+        schema.interfaces().stream().sorted(java.util.Comparator.comparing(org.openfoundry.foundation.spi.schema.InterfaceDefinition::name))
+                .forEach(type -> result.append("|I:").append(type.name()).append(type.interfaces()).append(type.constraints()).append(properties(type.properties())));
         schema.enums().entrySet().stream().sorted(Map.Entry.comparingByKey())
                 .forEach(entry -> result.append("|E:").append(entry.getKey()).append(entry.getValue().stream().sorted().toList()));
         schema.objectTypes().stream().sorted(java.util.Comparator.comparing(ObjectTypeDefinition::name))
-                .forEach(type -> result.append("|O:").append(type.name()).append(properties(type.properties())));
+                .forEach(type -> result.append("|O:").append(type.name()).append(type.interfaces()).append(type.constraints()).append(properties(type.properties())));
         schema.linkTypes().stream().sorted(java.util.Comparator.comparing(LinkTypeDefinition::name))
                 .forEach(type -> result.append("|L:").append(type.name()).append(':')
                         .append(type.fromType()).append(':').append(type.toType()).append(':')
-                        .append(type.cardinality()).append(properties(type.properties())));
+                        .append(type.cardinality()).append(type.interfaces()).append(type.constraints()).append(properties(type.properties())));
         schema.actionTypes().stream().sorted(java.util.Comparator.comparing(ActionTypeDefinition::name))
                 .forEach(type -> result.append("|A:").append(type.name()).append(':')
                         .append(type.permission()).append(':')
@@ -143,7 +150,8 @@ public final class SchemaCompiler {
     private static String properties(List<PropertyDefinition> properties) {
         return properties.stream().map(p -> p.name() + ':' + p.type() + ':' + p.required() + ':'
                         + p.primary() + ':' + p.unique() + ':' + p.indexed() + ':'
-                        + p.sensitive() + ':' + p.immutable())
+                        + p.sensitive() + ':' + p.immutable() + ':' + p.readOnly() + ':' + p.hasDefault() + ':'
+                        + org.openfoundry.foundation.spi.schema.PropertyValues.canonical(p.defaultValue()) + ':' + p.constraints())
                 .sorted().toList().toString();
     }
 }

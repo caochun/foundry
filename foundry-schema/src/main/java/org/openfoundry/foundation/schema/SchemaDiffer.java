@@ -24,6 +24,9 @@ public final class SchemaDiffer {
                     entry.getValue().containsAll(old) ? MigrationClass.COMPATIBLE : MigrationClass.BREAKING));
         }
         for (String name : previous.enums().keySet()) if (!next.enums().containsKey(name)) changes.add(new SchemaChange("enum." + name, "enum removed", MigrationClass.BREAKING));
+        if (!previous.interfaces().equals(next.interfaces())) {
+            changes.add(new SchemaChange("interfaces", "interface definitions or ancestry changed", MigrationClass.BREAKING));
+        }
         compareObjects(previous, next, changes);
         compareLinks(previous, next, changes);
         compareActions(previous, next, changes);
@@ -35,7 +38,14 @@ public final class SchemaDiffer {
         Map<String, ObjectTypeDefinition> newTypes = indexObjects(next);
         for (String name : newTypes.keySet()) {
             if (!oldTypes.containsKey(name)) changes.add(new SchemaChange("object." + name, "object type added", MigrationClass.SAFE));
-            else compareProperties("object." + name, oldTypes.get(name).properties(), newTypes.get(name).properties(), changes);
+            else {
+                var old = oldTypes.get(name);
+                var current = newTypes.get(name);
+                compareProperties("object." + name, old.properties(), current.properties(), changes);
+                if (!old.constraints().equals(current.constraints()) || !old.interfaces().equals(current.interfaces())) {
+                    changes.add(new SchemaChange("object." + name, "type constraints or interfaces changed", MigrationClass.BREAKING));
+                }
+            }
         }
         for (String name : oldTypes.keySet()) {
             if (!newTypes.containsKey(name)) changes.add(new SchemaChange("object." + name, "object type removed", MigrationClass.BREAKING));
@@ -59,6 +69,9 @@ public final class SchemaDiffer {
                 changes.add(new SchemaChange("link." + name, "relationship endpoints or cardinality changed", MigrationClass.BREAKING));
             }
             compareProperties("link." + name, old.properties(), current.properties(), changes);
+            if (!old.constraints().equals(current.constraints()) || !old.interfaces().equals(current.interfaces())) {
+                changes.add(new SchemaChange("link." + name, "type constraints or interfaces changed", MigrationClass.BREAKING));
+            }
         }
         for (String name : oldTypes.keySet()) {
             if (!newTypes.containsKey(name)) changes.add(new SchemaChange("link." + name, "link type removed", MigrationClass.BREAKING));
@@ -97,7 +110,9 @@ public final class SchemaDiffer {
                 MigrationClass classification = old.type().equals(current.type()) && !old.required() && current.required()
                         ? MigrationClass.BREAKING : MigrationClass.COMPATIBLE;
                 if (!old.type().equals(current.type()) || old.primary() != current.primary()
-                        || !old.unique() && current.unique() || !old.immutable() && current.immutable()) classification = MigrationClass.BREAKING;
+                        || !old.unique() && current.unique() || !old.immutable() && current.immutable()
+                        || old.readOnly() != current.readOnly() || !old.constraints().equals(current.constraints())
+                        || old.hasDefault() != current.hasDefault() || !java.util.Objects.equals(old.defaultValue(), current.defaultValue())) classification = MigrationClass.BREAKING;
                 changes.add(new SchemaChange(owner + "." + name, "property definition changed", classification));
             }
         }

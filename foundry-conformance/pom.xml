@@ -15,6 +15,9 @@
 
     <dependencies>
         <dependency>
+            <groupId>org.openfoundry</groupId><artifactId>foundry-schema</artifactId><version>${project.version}</version><scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>org.openfoundry</groupId>
             <artifactId>foundry-spi</artifactId>
             <version>${project.version}</version>

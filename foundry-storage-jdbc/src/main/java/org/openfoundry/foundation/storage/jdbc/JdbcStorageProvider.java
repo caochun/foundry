@@ -51,6 +51,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
     private final DataSource dataSource;
     private final Clock clock;
+    private final org.openfoundry.foundation.validation.PropertyValidator propertyValidator = new org.openfoundry.foundation.validation.PropertyValidator();
     private final DatabaseDialect dialect;
     private final ObjectMapper objectMapper;
     private final Object schemaLock = new Object();
@@ -71,7 +72,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
     public void applySchema(RequestContext context, OntologySchema schema) {
         Objects.requireNonNull(context, "context must not be null");
         Objects.requireNonNull(schema, "schema must not be null");
-        PropertyValues.requireSchema(schema);
+        propertyValidator.validateSchema(schema);
         synchronized (schemaLock) {
             try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
                 for (String ddl : dialect.currentTablesDdl().split(";\\s*")) {
@@ -484,6 +485,11 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().properties();
     }
 
+    private List<String> objectConstraints(String type) {
+        requireObjectType(type);
+        return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().constraints();
+    }
+
     private LinkTypeDefinition requireLinkType(String type) {
         if (schema == null) throw new IllegalStateException("schema has not been applied");
         return schema.linkTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst()
@@ -530,9 +536,9 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
             lockWrites();
             requireObjectType(type);
             if (findObject(type, id) != null) throw new IllegalStateException("object already exists: " + type + ":" + id);
-            properties = PropertyValues.validate(schema, objectProperties(type), id, properties, null);
-            uniqueProperties.check(schema, "object", type, objectProperties(type), id, properties, () -> currentProperties(false, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            properties = propertyValidator.validate(schema, objectProperties(type), objectConstraints(type), id, properties, null, context, now);
+            uniqueProperties.check(schema, "object", type, objectProperties(type), id, properties, () -> currentProperties(false, type));
             Instant effective = effectiveTime(false, type, id, effectiveAt, now);
             String sql = "INSERT INTO of_objects (tenant_id, object_type, object_id, version, created_at, updated_at, "
                     + "deleted_at, last_transaction_id, last_action_id, properties_json) VALUES (?, ?, ?, 1, ?, ?, NULL, ?, NULL, ?)";
@@ -558,9 +564,9 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
             ObjectRecord existing = requireObject(findObject(type, id), type, id);
             assertVersion(existing.version(), expectedVersion);
             if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
-            Map<String, Object> merged = PropertyValues.validate(schema, objectProperties(type), id, properties, existing.properties());
-            uniqueProperties.check(schema, "object", type, objectProperties(type), id, merged, () -> currentProperties(false, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Map<String, Object> merged = propertyValidator.validate(schema, objectProperties(type), objectConstraints(type), id, properties, existing.properties(), context, now);
+            uniqueProperties.check(schema, "object", type, objectProperties(type), id, merged, () -> currentProperties(false, type));
             Instant effective = effectiveTime(false, type, id, effectiveAt, now);
             long version = existing.version() + 1;
             String sql = "UPDATE of_objects SET version = ?, updated_at = ?, last_transaction_id = ?, properties_json = ? "
@@ -616,9 +622,9 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
             requireActiveObject(from); requireActiveObject(to);
             if (findLink(type, id) != null) throw new IllegalStateException("link already exists: " + type + ":" + id);
             enforceCardinality(definition, from, to);
-            properties = PropertyValues.validate(schema, requireLinkType(type).properties(), id, properties, null);
-            uniqueProperties.check(schema, "link", type, requireLinkType(type).properties(), id, properties, () -> currentProperties(true, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            properties = propertyValidator.validate(schema, requireLinkType(type).properties(), requireLinkType(type).constraints(), id, properties, null, context, now);
+            uniqueProperties.check(schema, "link", type, requireLinkType(type).properties(), id, properties, () -> currentProperties(true, type));
             Instant effective = effectiveTime(true, type, id, effectiveAt, now);
             if (effectiveAt != null) {
                 requireHistoricalEndpoint(from, effective, now);
@@ -651,9 +657,9 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
             LinkRecord existing = requireLink(findLink(type, id), type, id);
             assertVersion(existing.version(), expectedVersion);
             if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
-            Map<String, Object> merged = PropertyValues.validate(schema, requireLinkType(type).properties(), id, properties, existing.properties());
-            uniqueProperties.check(schema, "link", type, requireLinkType(type).properties(), id, merged, () -> currentProperties(true, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Map<String, Object> merged = propertyValidator.validate(schema, requireLinkType(type).properties(), requireLinkType(type).constraints(), id, properties, existing.properties(), context, now);
+            uniqueProperties.check(schema, "link", type, requireLinkType(type).properties(), id, merged, () -> currentProperties(true, type));
             Instant effective = effectiveTime(true, type, id, effectiveAt, now);
             long version = existing.version() + 1;
             String sql = "UPDATE of_links SET version = ?, updated_at = ?, last_transaction_id = ?, properties_json = ? "

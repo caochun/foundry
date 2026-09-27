@@ -18,4 +18,12 @@ class CelExpressionEvaluatorTest {
                 Map.of("person", person), actor));
         assertFalse(evaluator.evaluate("person.status == 'DISABLED'", Map.of("person", person), actor));
     }
+    @Test
+    void installsStandardFunctionsForStringsListsAndRegex() {
+        var evaluator = new CelExpressionEvaluator();
+        var actor = new ActionActor("u", Set.of());
+        assertTrue(evaluator.evaluate("size(params.names) == 2 && params.names.all(n, n.matches('^[A-Z]+$'))",
+                Map.of("names", java.util.List.of("AA", "BB")), actor));
+        assertFalse(evaluator.evaluate("size(params.name) > 4", Map.of("name", "abc"), actor));
+    }
 }

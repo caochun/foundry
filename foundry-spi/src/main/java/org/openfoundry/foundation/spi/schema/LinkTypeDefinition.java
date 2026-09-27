@@ -8,13 +8,19 @@ public record LinkTypeDefinition(
         String fromType,
         String toType,
         Cardinality cardinality,
-        List<PropertyDefinition> properties) {
+        List<PropertyDefinition> properties, List<String> interfaces, List<String> constraints) {
+
+    public LinkTypeDefinition(String name, String fromType, String toType, Cardinality cardinality, List<PropertyDefinition> properties) {
+        this(name, fromType, toType, cardinality, properties, List.of(), List.of());
+    }
 
     public LinkTypeDefinition {
         requireText(name, "name");
         requireText(fromType, "fromType");
         requireText(toType, "toType");
         Objects.requireNonNull(cardinality, "cardinality must not be null");
+        interfaces = List.copyOf(interfaces);
+        constraints = List.copyOf(constraints);
         properties = List.copyOf(Objects.requireNonNull(properties, "properties must not be null"));
     }
 

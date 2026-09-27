@@ -23,7 +23,7 @@ public final class PropertyValues {
         var names = new java.util.HashSet<String>();
         for (String name : java.util.stream.Stream.of(schema.objectTypes().stream().map(ObjectTypeDefinition::name),
                 schema.linkTypes().stream().map(LinkTypeDefinition::name), schema.actionTypes().stream().map(ActionTypeDefinition::name),
-                schema.enums().keySet().stream()).flatMap(stream -> stream).toList()) {
+                schema.enums().keySet().stream(), schema.interfaces().stream().map(InterfaceDefinition::name)).flatMap(stream -> stream).toList()) {
             if (!name.matches("[A-Za-z_][A-Za-z0-9_]*") || !names.add(name)) throw new IllegalArgumentException("Invalid or duplicate schema type: " + name);
         }
         schema.enums().forEach((name, values) -> {
@@ -34,15 +34,70 @@ public final class PropertyValues {
         for (var link : schema.linkTypes()) {
             if (!objectNames.contains(link.fromType()) || !objectNames.contains(link.toType())) throw new IllegalArgumentException("Unknown relationship endpoint type");
         }
-        for (var fields : java.util.stream.Stream.concat(schema.objectTypes().stream().map(ObjectTypeDefinition::properties),
-                schema.linkTypes().stream().map(LinkTypeDefinition::properties)).toList()) {
-            var fieldNames = new java.util.HashSet<String>();
-            if (fields.stream().filter(PropertyDefinition::primary).count() != 1) throw new IllegalArgumentException("Exactly one primary property is required");
-            for (var field : fields) {
-                if (!field.name().matches("[A-Za-z][A-Za-z0-9_]*") || !fieldNames.add(field.name())) throw new IllegalArgumentException("Invalid or reserved property: " + field.name());
-                String base = field.type().replace("[", "").replace("]", "").replace("!", "");
-                if (!SCALARS.contains(base) && !schema.enums().containsKey(base)) throw new IllegalArgumentException("Unknown property type: " + field.type());
-                if (field.primary() && (!field.type().equals("ID") || !field.required())) throw new IllegalArgumentException("Primary property must have type ID!");
+        var interfaces = new LinkedHashMap<String, InterfaceDefinition>();
+        schema.interfaces().forEach(type -> interfaces.put(type.name(), type));
+        var completed = new java.util.HashSet<String>();
+        for (var type : schema.interfaces()) {
+            requireFields(schema, type.properties(), false);
+            requireInterface(type.name(), interfaces, new java.util.HashSet<>(), completed);
+        }
+        for (var type : schema.objectTypes()) {
+            requireFields(schema, type.properties(), true);
+            requireInheritance(type.properties(), type.interfaces(), type.constraints(), interfaces);
+        }
+        for (var type : schema.linkTypes()) {
+            requireFields(schema, type.properties(), true);
+            requireInheritance(type.properties(), type.interfaces(), type.constraints(), interfaces);
+        }
+    }
+
+    private static void requireFields(OntologySchema schema, List<PropertyDefinition> fields, boolean concrete) {
+        var fieldNames = new java.util.HashSet<String>();
+        long primaryCount = fields.stream().filter(PropertyDefinition::primary).count();
+        if (concrete ? primaryCount != 1 : primaryCount > 1) {
+            throw new IllegalArgumentException("Concrete types require one primary property; interfaces allow at most one");
+        }
+        for (var field : fields) {
+            if (!field.name().matches("[A-Za-z][A-Za-z0-9_]*") || !fieldNames.add(field.name())) {
+                throw new IllegalArgumentException("Invalid or reserved property: " + field.name());
+            }
+            String base = field.type();
+            while (base.startsWith("[") && base.endsWith("]")) {
+                base = base.substring(1, base.length() - 1);
+                if (base.endsWith("!")) base = base.substring(0, base.length() - 1);
+            }
+            if (!SCALARS.contains(base) && !schema.enums().containsKey(base)) {
+                throw new IllegalArgumentException("Unknown property type: " + field.type());
+            }
+            if (field.primary() && (!field.type().equals("ID") || !field.required())) {
+                throw new IllegalArgumentException("Primary property must have type ID!");
+            }
+        }
+    }
+
+    private static void requireInterface(String name, Map<String, InterfaceDefinition> interfaces,
+                                         Set<String> visiting, Set<String> completed) {
+        if (completed.contains(name)) return;
+        var type = interfaces.get(name);
+        if (type == null) throw new IllegalArgumentException("Unknown interface: " + name);
+        if (!visiting.add(name)) throw new IllegalArgumentException("Cyclic interface: " + name);
+        for (String parent : type.interfaces()) requireInterface(parent, interfaces, visiting, completed);
+        requireInheritance(type.properties(), type.interfaces(), type.constraints(), interfaces);
+        visiting.remove(name);
+        completed.add(name);
+    }
+
+    private static void requireInheritance(List<PropertyDefinition> fields, List<String> parents,
+                                           List<String> constraints, Map<String, InterfaceDefinition> interfaces) {
+        if (new java.util.HashSet<>(parents).size() != parents.size()) {
+            throw new IllegalArgumentException("Duplicate implemented interface");
+        }
+        for (String parentName : parents) {
+            var parent = interfaces.get(parentName);
+            if (parent == null) throw new IllegalArgumentException("Unknown interface: " + parentName);
+            if (!fields.containsAll(parent.properties()) || !constraints.containsAll(parent.constraints())
+                    || !parents.containsAll(parent.interfaces())) {
+                throw new IllegalArgumentException("Unresolved or conflicting interface inheritance: " + parentName);
             }
         }
     }
@@ -75,13 +130,13 @@ public final class PropertyValues {
             if (value == null) {
                 if (property.required()) throw new PropertyValidationException("REQUIRED_PROPERTY", property.name());
             } else {
-                merged.put(property.name(), value(schema, property.type(), value, property.name()));
+                merged.put(property.name(), normalize(schema, property.type(), value, property.name()));
             }
         }
         return immutableMap(merged);
     }
 
-    private static Object value(OntologySchema schema, String type, Object raw, String field) {
+    public static Object normalize(OntologySchema schema, String type, Object raw, String field) {
         try {
             if (type.startsWith("[") && type.endsWith("]")) {
                 if (!(raw instanceof List<?> list)) throw invalid(field);
@@ -91,7 +146,7 @@ public final class PropertyValues {
                 var result = new ArrayList<>();
                 for (Object item : list) {
                     if (item == null && required) throw invalid(field);
-                    result.add(item == null ? null : value(schema, element, item, field));
+                    result.add(item == null ? null : normalize(schema, element, item, field));
                 }
                 return Collections.unmodifiableList(result);
             }
@@ -133,7 +188,7 @@ public final class PropertyValues {
                             || Math.abs(lat.doubleValue()) > 90 || Math.abs(lon.doubleValue()) > 180) throw invalid(field);
                     yield Map.of("lat", lat.doubleValue(), "lon", lon.doubleValue());
                 }
-                case "JSON" -> copy(raw);
+                case "JSON" -> immutableValue(raw);
                 default -> throw invalid(field);
             };
         } catch (PropertyValidationException failure) {
@@ -149,27 +204,27 @@ public final class PropertyValues {
 
     public static Map<String, Object> immutableMap(Map<String, Object> values) {
         var copy = new LinkedHashMap<String, Object>();
-        values.forEach((name, value) -> copy.put(name, copy(value)));
+        values.forEach((name, value) -> copy.put(name, immutableValue(value)));
         return Collections.unmodifiableMap(copy);
     }
 
-    private static Object copy(Object raw) {
+    public static Object immutableValue(Object raw) {
         if (raw == null || raw instanceof String || raw instanceof Boolean) return raw;
         if (raw instanceof Number number && Double.isFinite(number.doubleValue())) return raw;
         if (raw instanceof Map<?, ?> map) {
             var result = new LinkedHashMap<String, Object>();
             map.forEach((key, value) -> {
                 if (!(key instanceof String name)) throw new IllegalArgumentException("JSON keys must be strings");
-                result.put(name, copy(value));
+                result.put(name, immutableValue(value));
             });
             return Collections.unmodifiableMap(result);
         }
-        if (raw instanceof List<?> list) return Collections.unmodifiableList(list.stream().map(PropertyValues::copy).toList());
+        if (raw instanceof List<?> list) return Collections.unmodifiableList(list.stream().map(PropertyValues::immutableValue).toList());
         throw new IllegalArgumentException("Unsupported structured value");
     }
 
     public static String uniqueKey(OntologySchema schema, PropertyDefinition property, Object raw) {
-        return canonical(value(schema, property.type(), raw, property.name()));
+        return canonical(normalize(schema, property.type(), raw, property.name()));
     }
 
     public static String canonical(Object value) {

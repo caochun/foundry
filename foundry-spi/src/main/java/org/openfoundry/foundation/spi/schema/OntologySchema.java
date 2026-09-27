@@ -8,7 +8,12 @@ public record OntologySchema(
         String version,
         List<ObjectTypeDefinition> objectTypes,
         List<LinkTypeDefinition> linkTypes,
-        List<ActionTypeDefinition> actionTypes, java.util.Map<String, java.util.List<String>> enums) {
+        List<ActionTypeDefinition> actionTypes, java.util.Map<String, java.util.List<String>> enums, List<InterfaceDefinition> interfaces) {
+
+    public OntologySchema(String namespace, String version, List<ObjectTypeDefinition> objects,
+                          List<LinkTypeDefinition> links, List<ActionTypeDefinition> actions, java.util.Map<String, List<String>> enums) {
+        this(namespace, version, objects, links, actions, enums, List.of());
+    }
 
     public OntologySchema(String namespace, String version, List<ObjectTypeDefinition> objects,
                           List<LinkTypeDefinition> links, List<ActionTypeDefinition> actions) {
@@ -25,6 +30,7 @@ public record OntologySchema(
         objectTypes = List.copyOf(Objects.requireNonNull(objectTypes, "objectTypes must not be null"));
         linkTypes = List.copyOf(Objects.requireNonNull(linkTypes, "linkTypes must not be null"));
         enums = enums.entrySet().stream().collect(java.util.stream.Collectors.toUnmodifiableMap(java.util.Map.Entry::getKey, entry -> List.copyOf(entry.getValue())));
+        interfaces = List.copyOf(interfaces);
         actionTypes = List.copyOf(Objects.requireNonNull(actionTypes, "actionTypes must not be null"));
     }
 }

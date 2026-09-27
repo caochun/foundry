@@ -44,6 +44,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
 
     private final Object monitor = new Object();
     private final Clock clock;
+    private final org.openfoundry.foundation.validation.PropertyValidator propertyValidator = new org.openfoundry.foundation.validation.PropertyValidator();
 
     public InMemoryStorageProvider() {
         this(Clock.systemUTC());
@@ -60,7 +61,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
     @Override
     public void applySchema(RequestContext context, OntologySchema schema) {
         Objects.requireNonNull(context, "context must not be null");
-        PropertyValues.requireSchema(schema);
+        propertyValidator.validateSchema(schema);
         synchronized (monitor) {
             if (!Objects.equals(this.schema, schema)) revision++;
             this.schema = Objects.requireNonNull(schema, "schema must not be null");
@@ -252,6 +253,11 @@ public final class InMemoryStorageProvider implements StorageProvider {
         return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().properties();
     }
 
+    private List<String> objectConstraints(String type) {
+        requireObjectType(type);
+        return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().constraints();
+    }
+
     private LinkTypeDefinition requireLinkType(String type) {
         if (schema == null) {
             throw new IllegalStateException("schema has not been applied");
@@ -295,9 +301,9 @@ public final class InMemoryStorageProvider implements StorageProvider {
             if (working.objects.containsKey(key)) {
                 throw new IllegalStateException("object already exists: " + type + ":" + id);
             }
-            properties = PropertyValues.validate(schema, objectProperties(type), id, properties, null);
-            uniqueProperties.check(schema, "object", type, objectProperties(type), id, properties, () -> currentProperties(false, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            properties = propertyValidator.validate(schema, objectProperties(type), objectConstraints(type), id, properties, null, context, now);
+            uniqueProperties.check(schema, "object", type, objectProperties(type), id, properties, () -> currentProperties(false, type));
             Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             ObjectRecord object = new ObjectRecord(context.tenantId(), type, id, 1,
                     now, now, null, transactionId, null, properties);
@@ -323,9 +329,9 @@ public final class InMemoryStorageProvider implements StorageProvider {
             ObjectRecord existing = requireObject(working.objects.get(key), type, id);
             assertVersion(existing.version(), expectedVersion);
             if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
-            Map<String, Object> merged = PropertyValues.validate(schema, objectProperties(type), id, properties, existing.properties());
-            uniqueProperties.check(schema, "object", type, objectProperties(type), id, merged, () -> currentProperties(false, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Map<String, Object> merged = propertyValidator.validate(schema, objectProperties(type), objectConstraints(type), id, properties, existing.properties(), context, now);
+            uniqueProperties.check(schema, "object", type, objectProperties(type), id, merged, () -> currentProperties(false, type));
             Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             ObjectRecord updated = new ObjectRecord(context.tenantId(), type, id,
                     existing.version() + 1, existing.createdAt(), now, existing.deletedAt(),
@@ -377,9 +383,9 @@ public final class InMemoryStorageProvider implements StorageProvider {
             if (working.links.containsKey(key)) {
                 throw new IllegalStateException("link already exists: " + type + ":" + id);
             }
-            properties = PropertyValues.validate(schema, requireLinkType(type).properties(), id, properties, null);
-            uniqueProperties.check(schema, "link", type, requireLinkType(type).properties(), id, properties, () -> currentProperties(true, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            properties = propertyValidator.validate(schema, requireLinkType(type).properties(), requireLinkType(type).constraints(), id, properties, null, context, now);
+            uniqueProperties.check(schema, "link", type, requireLinkType(type).properties(), id, properties, () -> currentProperties(true, type));
             Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             if (!definition.fromType().equals(from.type()) || !definition.toType().equals(to.type())) {
                 throw new IllegalArgumentException("Link endpoint types do not match schema");
@@ -411,9 +417,9 @@ public final class InMemoryStorageProvider implements StorageProvider {
             LinkRecord existing = requireLink(working.links.get(key), type, id);
             assertVersion(existing.version(), expectedVersion);
             if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
-            Map<String, Object> merged = PropertyValues.validate(schema, requireLinkType(type).properties(), id, properties, existing.properties());
-            uniqueProperties.check(schema, "link", type, requireLinkType(type).properties(), id, merged, () -> currentProperties(true, type));
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Map<String, Object> merged = propertyValidator.validate(schema, requireLinkType(type).properties(), requireLinkType(type).constraints(), id, properties, existing.properties(), context, now);
+            uniqueProperties.check(schema, "link", type, requireLinkType(type).properties(), id, merged, () -> currentProperties(true, type));
             Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             LinkRecord updated = new LinkRecord(context.tenantId(), type, id, existing.from(),
                     existing.to(), existing.version() + 1, existing.createdAt(), now,

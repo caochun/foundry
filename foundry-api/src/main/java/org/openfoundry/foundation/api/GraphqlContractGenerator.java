@@ -1,17 +1,21 @@
 package org.openfoundry.foundation.api;
 
-import org.openfoundry.foundation.spi.schema.LinkTypeDefinition;
 import org.openfoundry.foundation.spi.schema.ObjectTypeDefinition;
 import org.openfoundry.foundation.spi.schema.OntologySchema;
 
 /** Generates a stable read/action contract; resolver execution stays in ApplicationService. */
 public final class GraphqlContractGenerator {
     public String generate(OntologySchema schema) {
-        StringBuilder result = new StringBuilder("scalar JSON\n\n");
+        StringBuilder result = new StringBuilder("scalar JSON\nscalar Date\nscalar DateTime\nscalar Duration\nscalar URI\nscalar GeoPoint\n\n");
+        schema.enums().forEach((name, values) -> result.append("enum ").append(name).append(" { ").append(String.join(" ", values)).append(" }\n"));
+        for (var type : schema.interfaces()) {
+            result.append("interface ").append(type.name()).append(implementsTypes(type.interfaces())).append(" {\n");
+            type.properties().forEach(property -> appendProperty(result, property));
+            result.append("}\n\n");
+        }
         for (ObjectTypeDefinition object : schema.objectTypes()) {
-            result.append("type ").append(object.name()).append(" {\n");
-            object.properties().forEach(property -> result.append("  ").append(property.name()).append(": ")
-                    .append(graphqlType(property.type())).append(property.primary() && property.required() ? "!" : "").append("\n"));
+            result.append("type ").append(object.name()).append(implementsTypes(object.interfaces())).append(" {\n");
+            object.properties().forEach(property -> appendProperty(result, property));
             result.append("}\n\n");
         }
         result.append("type Query {\n");
@@ -19,17 +23,20 @@ public final class GraphqlContractGenerator {
                 .append(object.name()).append("\n  ").append(lower(object.name())).append("s(first: Int, offset: Int): [")
                 .append(object.name()).append("!]!\n"));
         result.append("}\n\n");
-        result.append("type Mutation {\n");
-        schema.actionTypes().forEach(action -> result.append("  ").append(lower(action.name())).append("(input: JSON!): JSON!\n"));
-        result.append("}\n");
+        if (!schema.actionTypes().isEmpty()) {
+            result.append("type Mutation {\n");
+            schema.actionTypes().forEach(action -> result.append("  ").append(lower(action.name())).append("(input: String!): String\n"));
+            result.append("}\n");
+        }
         return result.toString();
     }
 
-    private static String graphqlType(String type) {
-        return switch (type) {
-            case "ID", "String", "Int", "Float", "Boolean", "Date", "DateTime", "JSON" -> type;
-            default -> type;
-        };
+    private static String implementsTypes(java.util.List<String> interfaces) {
+        return interfaces.isEmpty() ? "" : " implements " + String.join(" & ", interfaces);
+    }
+
+    private static void appendProperty(StringBuilder result, org.openfoundry.foundation.spi.schema.PropertyDefinition property) {
+        result.append("  ").append(property.name()).append(": ").append(property.type()).append(property.primary() ? "!" : "").append("\n");
     }
 
     private static String lower(String value) { return Character.toLowerCase(value.charAt(0)) + value.substring(1); }

@@ -64,7 +64,7 @@ public final class CelExpressionEvaluator implements ExpressionEvaluator {
         Env env = environment.extend(EnvOption.declarations(declarations));
         Env.AstIssuesTuple compiled = env.compile(expression);
         if (compiled.hasIssues()) throw new IllegalArgumentException("invalid CEL expression: " + compiled.getIssues());
-        return CEL.newProgram(env, compiled.getAst());
+        return env.program(compiled.getAst());
     }
 
     private static String normalize(String expression) {

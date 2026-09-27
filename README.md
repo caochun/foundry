@@ -4,7 +4,7 @@ Open Foundry is a domain-neutral Java foundation for object, relationship, tempo
 
 ## Current implementation boundary
 
-This is a partial Java remake of `syzygyhack/open-foundry`, not yet feature-equivalent to upstream v0.3.0. The original v0.1 checklist is superseded by the [parity repair plan](spec/upstream-parity-plan.md). Default/readonly/CEL property semantics, arbitrary retrospective interval corrections, external side-effect recovery, advanced queries and full ODL remain unfinished. Required/type/enum/unique/immutable checks now apply to object and link writes; see [property validation migration](spec/property-validation-migration.md) before upgrading existing data. Ordinary temporal transitions and ordered late facts now use format-2 history; [legacy history migration boundaries](spec/temporal-migration.md) must be reviewed before upgrade.
+This is a partial Java remake of `syzygyhack/open-foundry`, not yet feature-equivalent to upstream v0.3.0. The original v0.1 checklist is superseded by the [parity repair plan](spec/upstream-parity-plan.md). Arbitrary retrospective interval corrections, external side-effect recovery, advanced queries and full ODL remain unfinished. Literal defaults, managed readonly audit fields, field/type CEL constraints and ordinary interface inheritance now execute for object and link writes; see [declaration semantics](spec/adr/0008-declarative-properties-and-interfaces.md) for limits and migration behavior. Required/type/enum/unique/immutable checks now apply to object and link writes; see [property validation migration](spec/property-validation-migration.md) before upgrading existing data. Ordinary temporal transitions and ordered late facts now use format-2 history; [legacy history migration boundaries](spec/temporal-migration.md) must be reviewed before upgrade.
 
 The generic API now requires trusted schema/manifest registration for Actions, explicit permission relations and matching tenant/actor context. Direct ActionExecutor use requires an explicit authorization policy; default execution is denied. Registered reads hide sensitive fields by default and apply role-based field policies to current and historical values. Actions now prefer transactional command receipts: JDBC persists them with effects, audit and outbox; in-memory providers remain process-local. See [command receipts](spec/command-receipts.md) for recovery and upgrade boundaries. See [ADR-0004](spec/adr/0004-upstream-parity-and-governed-boundary.md) for API and OpenFGA tuple migration requirements.
 
@@ -20,6 +20,7 @@ mvn test
 
 - `foundry-spi`: stable object, link, history, transaction and storage contracts.
 - `foundry-schema`: ODL parsing, validation, schema diff and version registry.
+- `foundry-validation`: shared declaration validation and CEL property constraints for storage providers.
 - `foundry-storage-memory`: in-memory provider and local test baseline.
 - `foundry-storage-jdbc`: relational provider with temporal history and database dialects.
 - `foundry-actions`: Action manifests, CEL preconditions, transactions and idempotency.

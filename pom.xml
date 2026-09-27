@@ -13,6 +13,7 @@
 
     <modules>
         <module>foundry-spi</module>
+        <module>foundry-validation</module>
         <module>foundry-schema</module>
         <module>foundry-actions</module>
         <module>foundry-pack</module>

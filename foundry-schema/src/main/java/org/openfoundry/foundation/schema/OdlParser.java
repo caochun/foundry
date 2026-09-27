@@ -24,6 +24,10 @@ import org.openfoundry.foundation.spi.schema.PropertyDefinition;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Map;
+import java.util.LinkedHashMap;
+import java.util.Set;
+import org.openfoundry.foundation.spi.schema.InterfaceDefinition;
 
 /** Parses the ODL subset used by Foundation v0.1. ODL is GraphQL SDL plus directives. */
 public final class OdlParser {
@@ -43,16 +47,25 @@ public final class OdlParser {
         List<LinkTypeDefinition> links = new ArrayList<>();
         List<ActionTypeDefinition> actions = new ArrayList<>();
 
+        var rawInterfaces = new LinkedHashMap<String, graphql.language.InterfaceTypeDefinition>();
+        for (Definition<?> definition : document.getDefinitions()) {
+            if (definition instanceof graphql.language.InterfaceTypeDefinition type && rawInterfaces.put(type.getName(), type) != null) {
+                throw new SchemaValidationException(List.of("duplicate interface: " + type.getName()));
+            }
+        }
+        var interfaces = new LinkedHashMap<String, InterfaceDefinition>();
+        for (String name : rawInterfaces.keySet()) resolveInterface(name, rawInterfaces, interfaces, new java.util.HashSet<>());
+
         for (Definition<?> definition : document.getDefinitions()) {
             if (!(definition instanceof graphql.language.ObjectTypeDefinition object)) {
                 continue;
             }
             if (hasDirective(object, "linkType")) {
-                links.add(parseLink(object));
+                links.add(parseLink(object, interfaces));
             } else if (hasDirective(object, "actionType")) {
                 actions.add(parseAction(object));
             } else if (hasDirective(object, "objectType")) {
-                objects.add(parseObject(object));
+                objects.add(parseObject(object, interfaces));
             }
         }
 
@@ -63,25 +76,78 @@ public final class OdlParser {
                 if (enums.put(enumeration.getName(), values) != null) throw new SchemaValidationException(List.of("duplicate enum: " + enumeration.getName()));
             }
         }
-        return new OntologySchema(namespace.name(), namespace.version(), objects, links, actions, enums);
+        return new OntologySchema(namespace.name(), namespace.version(), objects, links, actions, enums, List.copyOf(interfaces.values()));
     }
 
     private static org.openfoundry.foundation.spi.schema.ObjectTypeDefinition parseObject(
-            graphql.language.ObjectTypeDefinition definition) {
-        return new org.openfoundry.foundation.spi.schema.ObjectTypeDefinition(definition.getName(), definition.getFieldDefinitions().stream()
-                .filter(field -> !hasDirective(field, "link") && !hasDirective(field, "computed"))
-                .map(OdlParser::parseProperty)
-                .toList());
+            graphql.language.ObjectTypeDefinition definition, Map<String, InterfaceDefinition> interfaces) {
+        var parents = ancestors(definition.getImplements(), interfaces);
+        var fields = resolveFields(definition.getFieldDefinitions(), parents, interfaces);
+        return new org.openfoundry.foundation.spi.schema.ObjectTypeDefinition(definition.getName(), fields, parents,
+                inheritedConstraints(definition, parents, interfaces));
     }
 
-    private static LinkTypeDefinition parseLink(graphql.language.ObjectTypeDefinition definition) {
+    private static LinkTypeDefinition parseLink(graphql.language.ObjectTypeDefinition definition, Map<String, InterfaceDefinition> interfaces) {
         Directive directive = requiredDirective(definition, "linkType");
-        return new LinkTypeDefinition(
-                definition.getName(),
-                requiredStringArgument(directive, "from"),
-                requiredStringArgument(directive, "to"),
-                Cardinality.valueOf(requiredEnumArgument(directive, "cardinality")),
-                definition.getFieldDefinitions().stream().map(OdlParser::parseProperty).toList());
+        var parents = ancestors(definition.getImplements(), interfaces);
+        return new LinkTypeDefinition(definition.getName(), requiredStringArgument(directive, "from"),
+                requiredStringArgument(directive, "to"), Cardinality.valueOf(requiredEnumArgument(directive, "cardinality")),
+                resolveFields(definition.getFieldDefinitions(), parents, interfaces), parents, inheritedConstraints(definition, parents, interfaces));
+    }
+
+    private static InterfaceDefinition resolveInterface(String name, Map<String, graphql.language.InterfaceTypeDefinition> source,
+                                                         Map<String, InterfaceDefinition> resolved, Set<String> visiting) {
+        if (resolved.containsKey(name)) return resolved.get(name);
+        if (!visiting.add(name)) throw new SchemaValidationException(List.of("interface inheritance cycle: " + name));
+        var definition = source.get(name);
+        if (definition == null) throw new SchemaValidationException(List.of("unknown interface: " + name));
+        for (var parent : definition.getImplements()) resolveInterface(((TypeName) parent).getName(), source, resolved, visiting);
+        var parents = ancestors(definition.getImplements(), resolved);
+        var result = new InterfaceDefinition(name, resolveFields(definition.getFieldDefinitions(), parents, resolved), parents,
+                inheritedConstraints(definition, parents, resolved));
+        resolved.put(name, result);
+        visiting.remove(name);
+        return result;
+    }
+
+    private static List<String> ancestors(List<Type> implementsTypes, Map<String, InterfaceDefinition> interfaces) {
+        var parents = new java.util.LinkedHashSet<String>();
+        for (Type<?> type : implementsTypes) {
+            String name = ((TypeName) type).getName();
+            var parent = interfaces.get(name);
+            if (parent == null) throw new SchemaValidationException(List.of("unknown interface: " + name));
+            parents.add(name);
+            parents.addAll(parent.interfaces());
+        }
+        return List.copyOf(parents);
+    }
+
+    private static List<PropertyDefinition> resolveFields(List<FieldDefinition> fields, List<String> parents, Map<String, InterfaceDefinition> interfaces) {
+        var result = new LinkedHashMap<String, PropertyDefinition>();
+        for (String parent : parents) for (var field : interfaces.get(parent).properties()) mergeField(result, field);
+        var declared = new java.util.HashSet<String>();
+        for (var field : fields) {
+            if (!declared.add(field.getName())) throw new SchemaValidationException(List.of("duplicate field: " + field.getName()));
+            if (!hasDirective(field, "link") && !hasDirective(field, "computed")) mergeField(result, parseProperty(field));
+        }
+        return List.copyOf(result.values());
+    }
+
+    private static void mergeField(Map<String, PropertyDefinition> fields, PropertyDefinition field) {
+        var inherited = fields.putIfAbsent(field.name(), field);
+        if (inherited != null && !inherited.equals(field)) throw new SchemaValidationException(List.of("conflicting inherited property: " + field.name()));
+    }
+
+    private static List<String> inheritedConstraints(DirectivesContainer<?> definition, List<String> parents, Map<String, InterfaceDefinition> interfaces) {
+        var expressions = new java.util.LinkedHashSet<String>();
+        for (String parent : parents) expressions.addAll(interfaces.get(parent).constraints());
+        expressions.addAll(constraints(definition));
+        return List.copyOf(expressions);
+    }
+
+    private static List<String> constraints(DirectivesContainer<?> source) {
+        return source.getDirectives().stream().filter(directive -> directive.getName().equals("constraint"))
+                .map(directive -> requiredStringArgument(directive, "expr")).toList();
     }
 
     private static ActionTypeDefinition parseAction(graphql.language.ObjectTypeDefinition definition) {
@@ -95,6 +161,14 @@ public final class OdlParser {
     }
 
     private static PropertyDefinition parseProperty(FieldDefinition field) {
+        var defaults = field.getDirectives().stream().filter(directive -> directive.getName().equals("default")).toList();
+        if (defaults.size() > 1) throw new SchemaValidationException(List.of("duplicate default: " + field.getName()));
+        Object defaultValue = null;
+        if (!defaults.isEmpty()) {
+            var argument = defaults.getFirst().getArgument("value");
+            if (argument == null) throw new SchemaValidationException(List.of("default requires value: " + field.getName()));
+            defaultValue = literal(argument.getValue());
+        }
         return new PropertyDefinition(
                 field.getName(),
                 typeName(field.getType()),
@@ -103,7 +177,29 @@ public final class OdlParser {
                 hasDirective(field, "unique"),
                 hasDirective(field, "indexed"),
                 hasDirective(field, "sensitive"),
-                hasDirective(field, "immutable"));
+                hasDirective(field, "immutable"), hasDirective(field, "readonly"), !defaults.isEmpty(), defaultValue, constraints(field));
+    }
+
+    private static Object literal(graphql.language.Value<?> value) {
+        if (value instanceof StringValue text) return text.getValue();
+        if (value instanceof graphql.language.EnumValue enumeration) return enumeration.getName();
+        if (value instanceof graphql.language.BooleanValue bool) return bool.isValue();
+        if (value instanceof graphql.language.NullValue) return null;
+        if (value instanceof graphql.language.IntValue number) {
+            try { return number.getValue().intValueExact(); }
+            catch (ArithmeticException overflow) { throw new SchemaValidationException(List.of("integer default exceeds Int range")); }
+        }
+        if (value instanceof graphql.language.FloatValue number) return number.getValue().doubleValue();
+        if (value instanceof graphql.language.ArrayValue list) return list.getValues().stream().map(OdlParser::literal).toList();
+        if (value instanceof graphql.language.ObjectValue object) {
+            var fields = new LinkedHashMap<String, Object>();
+            for (var field : object.getObjectFields()) {
+                if (fields.containsKey(field.getName())) throw new SchemaValidationException(List.of("duplicate default object key: " + field.getName()));
+                fields.put(field.getName(), literal(field.getValue()));
+            }
+            return fields;
+        }
+        throw new SchemaValidationException(List.of("default must be a literal"));
     }
 
     private static Namespace findNamespace(Document document) {
