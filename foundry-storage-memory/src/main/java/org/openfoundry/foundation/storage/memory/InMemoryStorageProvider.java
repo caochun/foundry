@@ -12,6 +12,8 @@ import org.openfoundry.foundation.spi.RequestContext;
 import org.openfoundry.foundation.spi.StorageCapabilities;
 import org.openfoundry.foundation.spi.StorageProvider;
 import org.openfoundry.foundation.spi.Transaction;
+import org.openfoundry.foundation.spi.TemporalHistory;
+import java.time.Clock;
 import org.openfoundry.foundation.spi.TraversalResult;
 import org.openfoundry.foundation.spi.TraversalStep;
 import org.openfoundry.foundation.spi.schema.Cardinality;
@@ -39,6 +41,16 @@ public final class InMemoryStorageProvider implements StorageProvider {
             true, true, false, false, false, true, false);
 
     private final Object monitor = new Object();
+    private final Clock clock;
+
+    public InMemoryStorageProvider() {
+        this(Clock.systemUTC());
+    }
+
+    public InMemoryStorageProvider(Clock clock) {
+        this.clock = Objects.requireNonNull(clock);
+    }
+
     private OntologySchema schema;
     private State state = new State();
     private long revision;
@@ -59,6 +71,16 @@ public final class InMemoryStorageProvider implements StorageProvider {
     @Override
     public List<ObjectRecord> queryObjects(RequestContext context, String type, QueryOptions options) {
         synchronized (monitor) {
+            if (options.asOfValidTime() != null) {
+                return TemporalHistory.page(state.objects.values().stream()
+                        .filter(object -> object.tenantId().equals(context.tenantId()) && object.type().equals(type))
+                        .map(object -> {
+                            var history = findHistory(context, object.key());
+                            var snapshot = TemporalHistory.at(history, options.asOfValidTime(), options.asOfRecordedTime());
+                            return snapshot == null ? null : TemporalHistory.object(context.tenantId(), snapshot, TemporalHistory.createdAt(history));
+                        }).filter(Objects::nonNull).filter(object -> options.includeDeleted() || !object.isDeleted())
+                        .sorted(Comparator.comparing(ObjectRecord::id)).toList(), options);
+            }
             return page(state.objects.entrySet().stream()
                     .filter(entry -> entry.getKey().startsWith(context.tenantId() + "|" + type + "|"))
                     .map(Map.Entry::getValue)
@@ -94,6 +116,18 @@ public final class InMemoryStorageProvider implements StorageProvider {
     public List<LinkRecord> getLinks(RequestContext context, EntityKey endpoint, String linkType,
                                      Direction direction, QueryOptions options) {
         synchronized (monitor) {
+            if (options.asOfValidTime() != null) {
+                return TemporalHistory.page(state.links.values().stream()
+                        .filter(link -> link.tenantId().equals(context.tenantId()) && link.type().equals(linkType))
+                        .map(link -> {
+                            var history = findHistory(context, new EntityKey(link.type(), link.id()));
+                            var snapshot = TemporalHistory.at(history, options.asOfValidTime(), options.asOfRecordedTime());
+                            return snapshot == null ? null : TemporalHistory.link(context.tenantId(), snapshot, history, options.asOfRecordedTime());
+                        }).filter(Objects::nonNull)
+                        .filter(link -> direction == Direction.OUTBOUND ? link.from().equals(endpoint) : link.to().equals(endpoint))
+                        .filter(link -> options.includeDeleted() || !link.isDeleted())
+                        .sorted(Comparator.comparing(LinkRecord::id)).toList(), options);
+            }
             return page(state.links.values().stream()
                     .filter(link -> link.tenantId().equals(context.tenantId()))
                     .filter(link -> link.type().equals(linkType))
@@ -124,41 +158,13 @@ public final class InMemoryStorageProvider implements StorageProvider {
     public TraversalResult traverseAsOf(RequestContext context, EntityKey start,
                                         List<TraversalStep> path, Instant validTime,
                                         Instant recordedTime, QueryOptions options) {
-        if (path.size() > 10) {
-            throw new IllegalArgumentException("traversal depth exceeds 10");
-        }
-        List<EntityKey> frontier = List.of(start);
-        List<HistorySnapshot> edges = new ArrayList<>();
         synchronized (monitor) {
-            for (TraversalStep step : path) {
-                List<EntityKey> next = new ArrayList<>();
-                for (EntityKey endpoint : frontier) {
-                    String prefix = context.tenantId() + "|" + step.linkType() + "|";
-                    for (Map.Entry<String, List<HistorySnapshot>> entry : state.history.entrySet()) {
-                        if (!entry.getKey().startsWith(prefix)) continue;
-                        HistorySnapshot snapshot = entry.getValue().stream()
-                                .filter(candidate -> !candidate.recordedAt().isAfter(recordedTime))
-                                .filter(candidate -> !validTime.isBefore(candidate.validFrom()))
-                                .filter(candidate -> candidate.validTo() == null || validTime.isBefore(candidate.validTo()))
-                                .max(Comparator.comparing(HistorySnapshot::recordedAt)
-                                        .thenComparingLong(HistorySnapshot::version))
-                                .orElse(null);
-                        if (snapshot == null) continue;
-                        EntityKey from = endpointFrom(snapshot);
-                        EntityKey to = endpointTo(snapshot);
-                        EntityKey source = step.direction() == StorageProvider.Direction.OUTBOUND ? from : to;
-                        EntityKey target = step.direction() == StorageProvider.Direction.OUTBOUND ? to : from;
-                        if (source.equals(endpoint)) {
-                            edges.add(snapshot);
-                            next.add(target);
-                        }
-                    }
-                }
-                frontier = next.stream().distinct().toList();
-                if (frontier.isEmpty()) break;
-            }
+            var objects = state.objects.values().stream().filter(object -> object.tenantId().equals(context.tenantId()))
+                    .flatMap(object -> findHistory(context, object.key()).stream()).toList();
+            var links = state.links.values().stream().filter(link -> link.tenantId().equals(context.tenantId()))
+                    .flatMap(link -> findHistory(context, new EntityKey(link.type(), link.id())).stream()).toList();
+            return TemporalHistory.traverse(objects, links, start, path, validTime, recordedTime, options);
         }
-        return new TraversalResult(page(frontier, options), edges);
     }
 
     @Override
@@ -199,15 +205,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
 
     private HistorySnapshot findAtTime(RequestContext context, EntityKey key,
                                        Instant validTime, Instant recordedTime) {
-        Objects.requireNonNull(validTime, "validTime must not be null");
-        Objects.requireNonNull(recordedTime, "recordedTime must not be null");
-        return findHistory(context, key).stream()
-                .filter(snapshot -> !snapshot.recordedAt().isAfter(recordedTime))
-                .filter(snapshot -> !validTime.isBefore(snapshot.validFrom()))
-                .filter(snapshot -> snapshot.validTo() == null || validTime.isBefore(snapshot.validTo()))
-                .max(Comparator.comparing(HistorySnapshot::recordedAt)
-                        .thenComparingLong(HistorySnapshot::version))
-                .orElse(null);
+        return TemporalHistory.at(findHistory(context, key), validTime, recordedTime);
     }
 
     private static <T> List<T> page(List<T> values, QueryOptions options) {
@@ -274,59 +272,86 @@ public final class InMemoryStorageProvider implements StorageProvider {
 
         @Override
         public ObjectRecord createObject(String type, String id, Map<String, Object> properties) {
+            return createObject(type, id, properties, null);
+        }
+
+        @Override
+        public ObjectRecord createObject(String type, String id, Map<String, Object> properties, Instant effectiveAt) {
             assertOpen();
             requireObjectType(type);
             String key = objectKey(context, type, id);
             if (working.objects.containsKey(key)) {
                 throw new IllegalStateException("object already exists: " + type + ":" + id);
             }
-            Instant now = Instant.now();
+            Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             ObjectRecord object = new ObjectRecord(context.tenantId(), type, id, 1,
                     now, now, null, transactionId, null, properties);
             working.objects.put(key, object);
             appendHistory(new EntityKey(type, id), 1, EntityOperation.CREATED,
-                    now, null, now, properties);
+                    effective, null, now, properties);
             return object;
         }
 
         @Override
         public ObjectRecord updateObject(String type, String id, Map<String, Object> properties,
                                          long expectedVersion) {
+            return updateObject(type, id, properties, expectedVersion, null);
+        }
+
+        @Override
+        public ObjectRecord updateObject(String type, String id, Map<String, Object> properties,
+                                         long expectedVersion, Instant effectiveAt) {
             assertOpen();
             requireObjectType(type);
             String key = objectKey(context, type, id);
             ObjectRecord existing = requireObject(working.objects.get(key), type, id);
             assertVersion(existing.version(), expectedVersion);
+            if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
             Map<String, Object> merged = new HashMap<>(existing.properties());
             merged.putAll(properties);
-            Instant now = Instant.now();
+            Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             ObjectRecord updated = new ObjectRecord(context.tenantId(), type, id,
                     existing.version() + 1, existing.createdAt(), now, existing.deletedAt(),
                     transactionId, null, merged);
             working.objects.put(key, updated);
             appendHistory(new EntityKey(type, id), updated.version(), EntityOperation.UPDATED,
-                    existing.updatedAt(), null, now, merged);
+                    effective, null, now, merged);
             return updated;
         }
 
         @Override
         public void deleteObject(String type, String id, long expectedVersion) {
+            deleteObject(type, id, expectedVersion, null);
+        }
+
+        @Override
+        public void deleteObject(String type, String id, long expectedVersion, Instant effectiveAt) {
             assertOpen();
             String key = objectKey(context, type, id);
             ObjectRecord existing = requireObject(working.objects.get(key), type, id);
             assertVersion(existing.version(), expectedVersion);
-            Instant now = Instant.now();
+            if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
+            Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             ObjectRecord deleted = new ObjectRecord(context.tenantId(), type, id,
-                    existing.version() + 1, existing.createdAt(), now, now,
+                    existing.version() + 1, existing.createdAt(), now, effective,
                     transactionId, null, existing.properties());
             working.objects.put(key, deleted);
             appendHistory(new EntityKey(type, id), deleted.version(), EntityOperation.DELETED,
-                    existing.updatedAt(), now, now, existing.properties());
+                    effective, null, now, existing.properties());
         }
 
         @Override
         public LinkRecord createLink(String type, String id, EntityKey from, EntityKey to,
                                      Map<String, Object> properties) {
+            return createLink(type, id, from, to, properties, null);
+        }
+
+        @Override
+        public LinkRecord createLink(String type, String id, EntityKey from, EntityKey to,
+                                     Map<String, Object> properties, Instant effectiveAt) {
             assertOpen();
             LinkTypeDefinition definition = requireLinkType(type);
             requireActiveObject(from);
@@ -335,49 +360,71 @@ public final class InMemoryStorageProvider implements StorageProvider {
             if (working.links.containsKey(key)) {
                 throw new IllegalStateException("link already exists: " + type + ":" + id);
             }
+            Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
+            if (!definition.fromType().equals(from.type()) || !definition.toType().equals(to.type())) {
+                throw new IllegalArgumentException("Link endpoint types do not match schema");
+            }
+            requireHistoricalEndpoint(from, effective, now);
+            requireHistoricalEndpoint(to, effective, now);
             enforceCardinality(definition, from, to);
-            Instant now = Instant.now();
+            enforceHistoricalCardinality(definition, from, to, effective, now);
             LinkRecord link = new LinkRecord(context.tenantId(), type, id, from, to, 1,
-                    now, now, null, now, null, transactionId, null, properties);
+                    now, now, null, effective, null, transactionId, null, properties);
             working.links.put(key, link);
             appendHistory(new EntityKey(type, id), 1, EntityOperation.CREATED,
-                    now, null, now, linkState(link));
+                    effective, null, now, linkState(link));
             return link;
         }
 
         @Override
         public LinkRecord updateLink(String type, String id, Map<String, Object> properties,
                                      long expectedVersion) {
+            return updateLink(type, id, properties, expectedVersion, null);
+        }
+
+        @Override
+        public LinkRecord updateLink(String type, String id, Map<String, Object> properties,
+                                     long expectedVersion, Instant effectiveAt) {
             assertOpen();
             String key = linkKey(context, type, id);
             LinkRecord existing = requireLink(working.links.get(key), type, id);
             assertVersion(existing.version(), expectedVersion);
+            if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
             Map<String, Object> merged = new HashMap<>(existing.properties());
             merged.putAll(properties);
-            Instant now = Instant.now();
+            Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             LinkRecord updated = new LinkRecord(context.tenantId(), type, id, existing.from(),
                     existing.to(), existing.version() + 1, existing.createdAt(), now,
                     existing.deletedAt(), existing.validFrom(), existing.validTo(),
                     transactionId, null, merged);
             working.links.put(key, updated);
             appendHistory(new EntityKey(type, id), updated.version(), EntityOperation.UPDATED,
-                    existing.validFrom(), existing.validTo(), now, linkState(updated));
+                    effective, null, now, linkState(updated));
             return updated;
         }
 
         @Override
         public void deleteLink(String type, String id, long expectedVersion) {
+            deleteLink(type, id, expectedVersion, null);
+        }
+
+        @Override
+        public void deleteLink(String type, String id, long expectedVersion, Instant effectiveAt) {
             assertOpen();
             String key = linkKey(context, type, id);
             LinkRecord existing = requireLink(working.links.get(key), type, id);
             assertVersion(existing.version(), expectedVersion);
-            Instant now = Instant.now();
+            if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
+            Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             LinkRecord deleted = new LinkRecord(context.tenantId(), type, id, existing.from(),
-                    existing.to(), existing.version() + 1, existing.createdAt(), now, now,
-                    existing.validFrom(), now, transactionId, null, existing.properties());
+                    existing.to(), existing.version() + 1, existing.createdAt(), now, effective,
+                    existing.validFrom(), effective, transactionId, null, existing.properties());
             working.links.put(key, deleted);
             appendHistory(new EntityKey(type, id), deleted.version(), EntityOperation.DELETED,
-                    existing.validFrom(), now, now, linkState(deleted));
+                    effective, null, now, linkState(deleted));
         }
 
         @Override
@@ -450,6 +497,33 @@ public final class InMemoryStorageProvider implements StorageProvider {
             }
             if (definition.cardinality() == Cardinality.MANY_TO_ONE && fromTaken) {
                 throw new IllegalStateException("many-to-one link cardinality violated: " + definition.name());
+            }
+        }
+
+        private void requireHistoricalEndpoint(EntityKey key, Instant effective, Instant recorded) {
+            if (!TemporalHistory.active(TemporalHistory.at(working.history.getOrDefault(historyKey(context, key), List.of()), effective, recorded))) {
+                throw new IllegalArgumentException("Link endpoint did not exist at effective time: " + key);
+            }
+        }
+
+        private void enforceHistoricalCardinality(LinkTypeDefinition definition, EntityKey from, EntityKey to, Instant effective, Instant recorded) {
+            if (definition.cardinality() == Cardinality.MANY_TO_MANY) return;
+            for (var link : working.links.values()) {
+                if (!link.tenantId().equals(context.tenantId()) || !link.type().equals(definition.name())) continue;
+                boolean conflicting = switch (definition.cardinality()) {
+                    case ONE_TO_ONE -> link.from().equals(from) || link.to().equals(to);
+                    case ONE_TO_MANY -> link.to().equals(to);
+                    case MANY_TO_ONE -> link.from().equals(from);
+                    default -> false;
+                };
+                if (!conflicting) continue;
+                var history = working.history.getOrDefault(historyKey(context, new EntityKey(link.type(), link.id())), List.of());
+                var boundaries = new ArrayList<Instant>();
+                boundaries.add(effective);
+                history.stream().map(HistorySnapshot::validFrom).filter(time -> !time.isBefore(effective) && !time.isAfter(recorded)).forEach(boundaries::add);
+                if (boundaries.stream().anyMatch(time -> TemporalHistory.active(TemporalHistory.at(history, time, recorded)))) {
+                    throw new IllegalStateException("Historical link cardinality overlap");
+                }
             }
         }
 

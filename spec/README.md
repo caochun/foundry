@@ -8,6 +8,7 @@
 
 - [上游对齐修复计划](upstream-parity-plan.md)：取代旧任务勾选作为当前完成度依据。
 - [ADR-0004](adr/0004-upstream-parity-and-governed-boundary.md)：通用执行治理、字段策略和兼容迁移。
+- [ADR-0005](adr/0005-temporal-transitions-and-legacy-history.md)：时间转换、迟到事实与旧历史隔离；[迁移说明](temporal-migration.md)。
 
 ## 阅读顺序
 

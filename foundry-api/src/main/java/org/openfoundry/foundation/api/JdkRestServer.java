@@ -46,6 +46,8 @@ public final class JdkRestServer implements AutoCloseable {
     private void handle(HttpExchange exchange) throws IOException {
         try {
             handleAuthenticated(exchange);
+        } catch (org.openfoundry.foundation.spi.TemporalHistoryUnavailableException legacy) {
+            write(exchange, new ApiResponse(409, Map.of("error", "Historical time query requires migration", "code", legacy.code())));
         } catch (SecurityException denied) {
             write(exchange, ApiResponse.forbidden());
         } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException invalid) {

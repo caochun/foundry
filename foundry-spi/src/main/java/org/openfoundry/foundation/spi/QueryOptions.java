@@ -10,6 +10,9 @@ public record QueryOptions(
         boolean includeDeleted) {
 
     public QueryOptions {
+        if ((asOfValidTime == null) != (asOfRecordedTime == null)) {
+            throw new IllegalArgumentException("Temporal queries require both valid and recorded time");
+        }
         if (limit < 1) {
             throw new IllegalArgumentException("limit must be at least 1");
         }

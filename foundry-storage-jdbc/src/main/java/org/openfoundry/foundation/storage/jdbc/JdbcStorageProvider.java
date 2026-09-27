@@ -15,6 +15,8 @@ import org.openfoundry.foundation.spi.RequestContext;
 import org.openfoundry.foundation.spi.StorageCapabilities;
 import org.openfoundry.foundation.spi.StorageProvider;
 import org.openfoundry.foundation.spi.Transaction;
+import org.openfoundry.foundation.spi.TemporalHistory;
+import java.time.Clock;
 import org.openfoundry.foundation.spi.TraversalResult;
 import org.openfoundry.foundation.spi.TraversalStep;
 import org.openfoundry.foundation.spi.schema.Cardinality;
@@ -46,12 +48,18 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
             true, true, false, false, false, true, false);
 
     private final DataSource dataSource;
+    private final Clock clock;
     private final DatabaseDialect dialect;
     private final ObjectMapper objectMapper;
     private final Object schemaLock = new Object();
     private volatile OntologySchema schema;
 
     public JdbcStorageProvider(DataSource dataSource, DatabaseDialect dialect) {
+        this(dataSource, dialect, Clock.systemUTC());
+    }
+
+    public JdbcStorageProvider(DataSource dataSource, DatabaseDialect dialect, Clock clock) {
+        this.clock = Objects.requireNonNull(clock);
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource must not be null");
         this.dialect = Objects.requireNonNull(dialect, "dialect must not be null");
         this.objectMapper = new ObjectMapper();
@@ -66,6 +74,8 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 for (String ddl : dialect.currentTablesDdl().split(";\\s*")) {
                     if (!ddl.isBlank()) statement.execute(ddl);
                 }
+                ensureHistoryFormat(connection, "of_object_history");
+                ensureHistoryFormat(connection, "of_link_history");
                 connection.commit();
                 this.schema = schema;
             } catch (SQLException exception) {
@@ -95,6 +105,17 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
     @Override
     public List<ObjectRecord> queryObjects(RequestContext context, String type, QueryOptions options) {
+        if (options.asOfValidTime() != null) {
+            try (Connection connection = dataSource.getConnection()) {
+                var history = readTemporalHistory(connection, context, false, type, null, options.asOfRecordedTime());
+                var rows = TemporalHistory.group(history).values().stream().map(versions -> {
+                    var snapshot = TemporalHistory.at(versions, options.asOfValidTime(), options.asOfRecordedTime());
+                    return snapshot == null ? null : TemporalHistory.object(context.tenantId(), snapshot, TemporalHistory.createdAt(versions));
+                }).filter(Objects::nonNull).filter(object -> options.includeDeleted() || !object.isDeleted())
+                        .sorted(java.util.Comparator.comparing(ObjectRecord::id)).toList();
+                return TemporalHistory.page(rows, options);
+            } catch (SQLException failure) { throw sqlError("temporal object list", failure); }
+        }
         String deleted = options.includeDeleted() ? "" : " AND deleted_at IS NULL";
         String sql = """
                 SELECT tenant_id, object_type, object_id, version, created_at, updated_at,
@@ -125,15 +146,9 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
     @Override
     public HistorySnapshot getObjectAtTime(RequestContext context, String type, String id,
                                            Instant validTime, Instant recordedTime) {
-        return readHistory(context, false, type, id,
-                " AND recorded_at <= ? AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)"
-                        + " ORDER BY recorded_at DESC, version DESC" + dialect.paginationClause(), statement -> {
-                    statement.setTimestamp(4, timestamp(recordedTime));
-                    statement.setTimestamp(5, timestamp(validTime));
-                    statement.setTimestamp(6, timestamp(validTime));
-                    statement.setInt(7, 1);
-                    statement.setInt(8, 0);
-                }).stream().findFirst().orElse(null);
+        try (Connection connection = dataSource.getConnection()) {
+            return TemporalHistory.at(readTemporalHistory(connection, context, false, type, id, recordedTime), validTime, recordedTime);
+        } catch (SQLException failure) { throw sqlError("temporal object read", failure); }
     }
 
     @Override
@@ -154,6 +169,19 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
     @Override
     public List<LinkRecord> getLinks(RequestContext context, EntityKey endpoint, String linkType,
                                      Direction direction, QueryOptions options) {
+        if (options.asOfValidTime() != null) {
+            try (Connection connection = dataSource.getConnection()) {
+                var history = readTemporalHistory(connection, context, true, linkType, null, options.asOfRecordedTime());
+                var rows = TemporalHistory.group(history).values().stream().map(versions -> {
+                    var snapshot = TemporalHistory.at(versions, options.asOfValidTime(), options.asOfRecordedTime());
+                    return snapshot == null ? null : TemporalHistory.link(context.tenantId(), snapshot, versions, options.asOfRecordedTime());
+                }).filter(Objects::nonNull)
+                        .filter(link -> direction == Direction.OUTBOUND ? link.from().equals(endpoint) : link.to().equals(endpoint))
+                        .filter(link -> options.includeDeleted() || !link.isDeleted())
+                        .sorted(java.util.Comparator.comparing(LinkRecord::id)).toList();
+                return TemporalHistory.page(rows, options);
+            } catch (SQLException failure) { throw sqlError("temporal link list", failure); }
+        }
         String endpointType = direction == Direction.OUTBOUND ? "from_type" : "to_type";
         String endpointId = direction == Direction.OUTBOUND ? "from_id" : "to_id";
         String deleted = options.includeDeleted() ? "" : " AND deleted_at IS NULL";
@@ -186,15 +214,9 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
     @Override
     public HistorySnapshot getLinkAtTime(RequestContext context, String type, String id,
                                          Instant validTime, Instant recordedTime) {
-        return readHistory(context, true, type, id,
-                " AND recorded_at <= ? AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)"
-                        + " ORDER BY recorded_at DESC, version DESC" + dialect.paginationClause(), statement -> {
-                    statement.setTimestamp(4, timestamp(recordedTime));
-                    statement.setTimestamp(5, timestamp(validTime));
-                    statement.setTimestamp(6, timestamp(validTime));
-                    statement.setInt(7, 1);
-                    statement.setInt(8, 0);
-                }).stream().findFirst().orElse(null);
+        try (Connection connection = dataSource.getConnection()) {
+            return TemporalHistory.at(readTemporalHistory(connection, context, true, type, id, recordedTime), validTime, recordedTime);
+        } catch (SQLException failure) { throw sqlError("temporal link read", failure); }
     }
 
     @Override
@@ -202,40 +224,32 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                                         List<TraversalStep> path, Instant validTime,
                                         Instant recordedTime, QueryOptions options) {
         if (path.size() > 10) throw new IllegalArgumentException("traversal depth exceeds 10");
-        List<EntityKey> frontier = List.of(start);
-        List<HistorySnapshot> edges = new ArrayList<>();
-        for (TraversalStep step : path) {
-            List<EntityKey> next = new ArrayList<>();
-            for (EntityKey endpoint : frontier) {
-                String endpointType = step.direction() == Direction.OUTBOUND ? "from_type" : "to_type";
-                String endpointId = step.direction() == Direction.OUTBOUND ? "from_id" : "to_id";
-                String sql = "SELECT * FROM of_link_history WHERE tenant_id = ? AND link_type = ? AND "
-                        + endpointType + " = ? AND " + endpointId + " = ? AND recorded_at <= ?"
-                        + " AND valid_from <= ? AND (valid_to IS NULL OR valid_to > ?)"
-                        + " ORDER BY link_id, recorded_at DESC, version DESC";
-                try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
-                    statement.setString(1, context.tenantId()); statement.setString(2, step.linkType());
-                    statement.setString(3, endpoint.type()); statement.setString(4, endpoint.id());
-                    statement.setTimestamp(5, timestamp(recordedTime)); statement.setTimestamp(6, timestamp(validTime)); statement.setTimestamp(7, timestamp(validTime));
-                    try (ResultSet result = statement.executeQuery()) {
-                        Map<String, HistorySnapshot> latestByLink = new LinkedHashMap<>();
-                        while (result.next()) {
-                            HistorySnapshot snapshot = readHistory(result, true);
-                            latestByLink.putIfAbsent(snapshot.key().id(), snapshot);
-                        }
-                        for (HistorySnapshot snapshot : latestByLink.values()) {
-                            EntityKey target = step.direction() == Direction.OUTBOUND
-                                    ? endpointTo(snapshot) : endpointFrom(snapshot);
-                            edges.add(snapshot);
-                            next.add(target);
-                        }
-                    }
-                } catch (SQLException exception) { throw sqlError("temporal traversal", exception); }
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            connection.setReadOnly(true);
+            connection.setAutoCommit(false);
+            try {
+                var objectTypes = new java.util.HashSet<String>();
+                objectTypes.add(start.type());
+                var linkTypes = new java.util.HashSet<String>();
+                for (var step : path) {
+                    var definition = requireLinkType(step.linkType());
+                    linkTypes.add(definition.name());
+                    objectTypes.add(definition.fromType());
+                    objectTypes.add(definition.toType());
+                }
+                var objects = new ArrayList<HistorySnapshot>();
+                var links = new ArrayList<HistorySnapshot>();
+                for (String type : objectTypes) objects.addAll(readTemporalHistory(connection, context, false, type, null, recordedTime));
+                for (String type : linkTypes) links.addAll(readTemporalHistory(connection, context, true, type, null, recordedTime));
+                var result = TemporalHistory.traverse(objects, links, start, path, validTime, recordedTime, options);
+                connection.commit();
+                return result;
+            } catch (RuntimeException | SQLException failure) {
+                connection.rollback();
+                throw failure;
             }
-            frontier = next.stream().distinct().toList();
-            if (frontier.isEmpty()) break;
-        }
-        return new TraversalResult(page(frontier, options), edges);
+        } catch (SQLException failure) { throw sqlError("temporal traversal", failure); }
     }
 
     @Override
@@ -303,6 +317,50 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         }
     }
 
+    private static boolean hasHistoryFormat(Connection connection, String table) throws SQLException {
+        try (var columns = connection.getMetaData().getColumns(null, connection.getSchema(), null, null)) {
+            while (columns.next()) {
+                if (table.equalsIgnoreCase(columns.getString("TABLE_NAME")) && "temporal_format".equalsIgnoreCase(columns.getString("COLUMN_NAME"))) return true;
+            }
+            return false;
+        }
+    }
+
+    private static void ensureHistoryFormat(Connection connection, String table) throws SQLException {
+        if (hasHistoryFormat(connection, table)) return;
+        try (var statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE " + table + " ADD COLUMN temporal_format INTEGER DEFAULT 1 NOT NULL");
+        } catch (SQLException competingInitializer) {
+            if (!hasHistoryFormat(connection, table)) throw competingInitializer;
+        }
+    }
+
+    private List<HistorySnapshot> readTemporalHistory(Connection connection, RequestContext context, boolean link,
+                                                       String type, String id, Instant recordedTime) throws SQLException {
+        String table = link ? "of_link_history" : "of_object_history";
+        String prefix = link ? "link" : "object";
+        String sql = "SELECT * FROM " + table + " WHERE tenant_id = ? AND " + prefix + "_type = ?"
+                + (recordedTime == null ? "" : " AND recorded_at <= ?")
+                + (id == null ? "" : " AND " + prefix + "_id = ?") + " ORDER BY " + prefix + "_id, version";
+        try (var statement = connection.prepareStatement(sql)) {
+            statement.setString(1, context.tenantId());
+            statement.setString(2, type);
+            int parameter = 3;
+            if (recordedTime != null) statement.setTimestamp(parameter++, timestamp(recordedTime));
+            if (id != null) statement.setString(parameter, id);
+            try (var rows = statement.executeQuery()) {
+                var result = new ArrayList<HistorySnapshot>();
+                while (rows.next()) {
+                    if (rows.getInt("temporal_format") != 2) {
+                        throw new org.openfoundry.foundation.spi.TemporalHistoryUnavailableException(type, rows.getString(prefix + "_id"));
+                    }
+                    result.add(readHistory(rows, link));
+                }
+                return List.copyOf(result);
+            }
+        }
+    }
+
     private ObjectRecord readObject(ResultSet result) throws SQLException {
         return new ObjectRecord(result.getString("tenant_id"), result.getString("object_type"),
                 result.getString("object_id"), result.getLong("version"), instant(result, "created_at"),
@@ -327,10 +385,10 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         Map<String, Object> state = jsonMap(result.getString("state_json"));
         if (link) {
             state = new LinkedHashMap<>(state);
-            state.putIfAbsent("_fromType", result.getString("from_type"));
-            state.putIfAbsent("_fromId", result.getString("from_id"));
-            state.putIfAbsent("_toType", result.getString("to_type"));
-            state.putIfAbsent("_toId", result.getString("to_id"));
+            state.put("_fromType", result.getString("from_type"));
+            state.put("_fromId", result.getString("from_id"));
+            state.put("_toType", result.getString("to_type"));
+            state.put("_toId", result.getString("to_id"));
         }
         return new HistorySnapshot(new EntityKey(type, id), result.getLong("version"),
                 EntityOperation.valueOf(result.getString("operation")), instant(result, "valid_from"),
@@ -428,28 +486,42 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
         @Override
         public ObjectRecord createObject(String type, String id, Map<String, Object> properties) {
+            return createObject(type, id, properties, null);
+        }
+
+        @Override
+        public ObjectRecord createObject(String type, String id, Map<String, Object> properties, Instant effectiveAt) {
             assertOpen();
             requireObjectType(type);
             if (findObject(type, id) != null) throw new IllegalStateException("object already exists: " + type + ":" + id);
-            Instant now = Instant.now();
+            Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = effectiveTime(false, type, id, effectiveAt, now);
             String sql = "INSERT INTO of_objects (tenant_id, object_type, object_id, version, created_at, updated_at, "
                     + "deleted_at, last_transaction_id, last_action_id, properties_json) VALUES (?, ?, ?, 1, ?, ?, NULL, ?, NULL, ?)";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, context.tenantId()); statement.setString(2, type); statement.setString(3, id);
                 statement.setTimestamp(4, timestamp(now)); statement.setTimestamp(5, timestamp(now));
                 statement.setString(6, transactionId); statement.setString(7, json(properties)); statement.executeUpdate();
-                insertObjectHistory(type, id, 1, EntityOperation.CREATED, now, null, now, properties);
+                insertObjectHistory(type, id, 1, EntityOperation.CREATED, effective, null, now, properties);
                 return findObject(type, id);
             } catch (SQLException exception) { throw sqlError("create object", exception); }
         }
 
         @Override
         public ObjectRecord updateObject(String type, String id, Map<String, Object> properties, long expectedVersion) {
+            return updateObject(type, id, properties, expectedVersion, null);
+        }
+
+        @Override
+        public ObjectRecord updateObject(String type, String id, Map<String, Object> properties, long expectedVersion, Instant effectiveAt) {
             assertOpen();
             ObjectRecord existing = requireObject(findObject(type, id), type, id);
             assertVersion(existing.version(), expectedVersion);
+            if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
             Map<String, Object> merged = new HashMap<>(existing.properties()); merged.putAll(properties);
-            Instant now = Instant.now(); long version = existing.version() + 1;
+            Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = effectiveTime(false, type, id, effectiveAt, now);
+            long version = existing.version() + 1;
             String sql = "UPDATE of_objects SET version = ?, updated_at = ?, last_transaction_id = ?, properties_json = ? "
                     + "WHERE tenant_id = ? AND object_type = ? AND object_id = ? AND version = ?";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -457,54 +529,81 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setString(4, json(merged)); statement.setString(5, context.tenantId()); statement.setString(6, type);
                 statement.setString(7, id); statement.setLong(8, expectedVersion);
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during object update");
-                insertObjectHistory(type, id, version, EntityOperation.UPDATED, existing.updatedAt(), null, now, merged);
+                insertObjectHistory(type, id, version, EntityOperation.UPDATED, effective, null, now, merged);
                 return findObject(type, id);
             } catch (SQLException exception) { throw sqlError("update object", exception); }
         }
 
         @Override
         public void deleteObject(String type, String id, long expectedVersion) {
+            deleteObject(type, id, expectedVersion, null);
+        }
+
+        @Override
+        public void deleteObject(String type, String id, long expectedVersion, Instant effectiveAt) {
             assertOpen();
             ObjectRecord existing = requireObject(findObject(type, id), type, id);
             assertVersion(existing.version(), expectedVersion);
-            Instant now = Instant.now(); long version = existing.version() + 1;
+            if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
+            Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = effectiveTime(false, type, id, effectiveAt, now);
+            long version = existing.version() + 1;
             String sql = "UPDATE of_objects SET version = ?, updated_at = ?, deleted_at = ?, last_transaction_id = ? "
                     + "WHERE tenant_id = ? AND object_type = ? AND object_id = ? AND version = ?";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                statement.setLong(1, version); statement.setTimestamp(2, timestamp(now)); statement.setTimestamp(3, timestamp(now));
+                statement.setLong(1, version); statement.setTimestamp(2, timestamp(now)); statement.setTimestamp(3, timestamp(effective));
                 statement.setString(4, transactionId); statement.setString(5, context.tenantId()); statement.setString(6, type);
                 statement.setString(7, id); statement.setLong(8, expectedVersion);
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during object delete");
-                insertObjectHistory(type, id, version, EntityOperation.DELETED, existing.updatedAt(), now, now, existing.properties());
+                insertObjectHistory(type, id, version, EntityOperation.DELETED, effective, null, now, existing.properties());
             } catch (SQLException exception) { throw sqlError("delete object", exception); }
         }
 
         @Override
         public LinkRecord createLink(String type, String id, EntityKey from, EntityKey to, Map<String, Object> properties) {
+            return createLink(type, id, from, to, properties, null);
+        }
+
+        @Override
+        public LinkRecord createLink(String type, String id, EntityKey from, EntityKey to, Map<String, Object> properties, Instant effectiveAt) {
             assertOpen(); LinkTypeDefinition definition = requireLinkType(type);
             requireActiveObject(from); requireActiveObject(to);
             if (findLink(type, id) != null) throw new IllegalStateException("link already exists: " + type + ":" + id);
             enforceCardinality(definition, from, to);
-            Instant now = Instant.now();
+            Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = effectiveTime(true, type, id, effectiveAt, now);
+            if (effectiveAt != null) {
+                requireHistoricalEndpoint(from, effective, now);
+                requireHistoricalEndpoint(to, effective, now);
+                enforceHistoricalCardinality(definition, from, to, effective, now);
+            }
             String sql = "INSERT INTO of_links (tenant_id, link_type, link_id, from_type, from_id, to_type, to_id, version, "
                     + "created_at, updated_at, deleted_at, valid_from, valid_to, last_transaction_id, last_action_id, properties_json) "
                     + "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL, ?, NULL, ?, NULL, ?)";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, context.tenantId()); statement.setString(2, type); statement.setString(3, id);
                 statement.setString(4, from.type()); statement.setString(5, from.id()); statement.setString(6, to.type()); statement.setString(7, to.id());
-                statement.setTimestamp(8, timestamp(now)); statement.setTimestamp(9, timestamp(now)); statement.setTimestamp(10, timestamp(now));
+                statement.setTimestamp(8, timestamp(now)); statement.setTimestamp(9, timestamp(now)); statement.setTimestamp(10, timestamp(effective));
                 statement.setString(11, transactionId); statement.setString(12, json(properties)); statement.executeUpdate();
-                insertLinkHistory(type, id, from, to, 1, EntityOperation.CREATED, now, null, now, properties);
+                insertLinkHistory(type, id, from, to, 1, EntityOperation.CREATED, effective, null, now, properties);
                 return findLink(type, id);
             } catch (SQLException exception) { throw sqlError("create link", exception); }
         }
 
         @Override
         public LinkRecord updateLink(String type, String id, Map<String, Object> properties, long expectedVersion) {
+            return updateLink(type, id, properties, expectedVersion, null);
+        }
+
+        @Override
+        public LinkRecord updateLink(String type, String id, Map<String, Object> properties, long expectedVersion, Instant effectiveAt) {
             assertOpen(); LinkRecord existing = requireLink(findLink(type, id), type, id);
             assertVersion(existing.version(), expectedVersion);
+            if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
             Map<String, Object> merged = new HashMap<>(existing.properties()); merged.putAll(properties);
-            Instant now = Instant.now(); long version = existing.version() + 1;
+            Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = effectiveTime(true, type, id, effectiveAt, now);
+            long version = existing.version() + 1;
             String sql = "UPDATE of_links SET version = ?, updated_at = ?, last_transaction_id = ?, properties_json = ? "
                     + "WHERE tenant_id = ? AND link_type = ? AND link_id = ? AND version = ?";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -512,23 +611,31 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setString(4, json(merged)); statement.setString(5, context.tenantId()); statement.setString(6, type); statement.setString(7, id); statement.setLong(8, expectedVersion);
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during link update");
                 insertLinkHistory(type, id, existing.from(), existing.to(), version, EntityOperation.UPDATED,
-                        existing.validFrom(), existing.validTo(), now, merged);
+                        effective, null, now, merged);
                 return findLink(type, id);
             } catch (SQLException exception) { throw sqlError("update link", exception); }
         }
 
         @Override
         public void deleteLink(String type, String id, long expectedVersion) {
+            deleteLink(type, id, expectedVersion, null);
+        }
+
+        @Override
+        public void deleteLink(String type, String id, long expectedVersion, Instant effectiveAt) {
             assertOpen(); LinkRecord existing = requireLink(findLink(type, id), type, id);
-            assertVersion(existing.version(), expectedVersion); Instant now = Instant.now(); long version = existing.version() + 1;
+            assertVersion(existing.version(), expectedVersion);
+            if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted"); Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = effectiveTime(true, type, id, effectiveAt, now);
+            long version = existing.version() + 1;
             String sql = "UPDATE of_links SET version = ?, updated_at = ?, deleted_at = ?, valid_to = ?, last_transaction_id = ? "
                     + "WHERE tenant_id = ? AND link_type = ? AND link_id = ? AND version = ?";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                statement.setLong(1, version); statement.setTimestamp(2, timestamp(now)); statement.setTimestamp(3, timestamp(now)); statement.setTimestamp(4, timestamp(now)); statement.setString(5, transactionId);
+                statement.setLong(1, version); statement.setTimestamp(2, timestamp(now)); statement.setTimestamp(3, timestamp(effective)); statement.setTimestamp(4, timestamp(effective)); statement.setString(5, transactionId);
                 statement.setString(6, context.tenantId()); statement.setString(7, type); statement.setString(8, id); statement.setLong(9, expectedVersion);
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during link delete");
                 insertLinkHistory(type, id, existing.from(), existing.to(), version, EntityOperation.DELETED,
-                        existing.validFrom(), now, now, existing.properties());
+                        effective, null, now, existing.properties());
             } catch (SQLException exception) { throw sqlError("delete link", exception); }
         }
 
@@ -588,6 +695,53 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
             } catch (SQLException exception) { throw sqlError("read transactional link", exception); }
         }
 
+        private Instant effectiveTime(boolean link, String type, String id, Instant requested, Instant recorded) {
+            if (requested != null) {
+                try {
+                    return TemporalHistory.effectiveAt(requested, recorded, readTemporalHistory(connection, context, link, type, id, null));
+                } catch (SQLException failure) { throw sqlError("validate effective time", failure); }
+            }
+            String prefix = link ? "link" : "object";
+            String sql = "SELECT * FROM of_" + prefix + "_history WHERE tenant_id = ? AND " + prefix + "_type = ? AND " + prefix + "_id = ? ORDER BY version DESC" + dialect.paginationClause();
+            try (var statement = connection.prepareStatement(sql)) {
+                statement.setString(1, context.tenantId()); statement.setString(2, type); statement.setString(3, id);
+                statement.setInt(4, 1); statement.setInt(5, 0);
+                try (var rows = statement.executeQuery()) {
+                    return TemporalHistory.effectiveAt(null, recorded, rows.next() ? List.of(readHistory(rows, link)) : List.of());
+                }
+            } catch (SQLException failure) { throw sqlError("validate recorded time", failure); }
+        }
+
+        private void requireHistoricalEndpoint(EntityKey key, Instant effective, Instant recorded) {
+            try {
+                var snapshot = TemporalHistory.at(readTemporalHistory(connection, context, false, key.type(), key.id(), recorded), effective, recorded);
+                if (!TemporalHistory.active(snapshot)) throw new IllegalArgumentException("Link endpoint did not exist at effective time: " + key);
+            } catch (SQLException failure) { throw sqlError("validate historical endpoint", failure); }
+        }
+
+        private void enforceHistoricalCardinality(LinkTypeDefinition definition, EntityKey from, EntityKey to, Instant effective, Instant recorded) {
+            if (definition.cardinality() == Cardinality.MANY_TO_MANY) return;
+            try {
+                var histories = TemporalHistory.group(readTemporalHistory(connection, context, true, definition.name(), null, recorded));
+                for (var history : histories.values()) {
+                    var first = history.getFirst();
+                    boolean conflicting = switch (definition.cardinality()) {
+                        case ONE_TO_ONE -> TemporalHistory.from(first).equals(from) || TemporalHistory.to(first).equals(to);
+                        case ONE_TO_MANY -> TemporalHistory.to(first).equals(to);
+                        case MANY_TO_ONE -> TemporalHistory.from(first).equals(from);
+                        default -> false;
+                    };
+                    if (!conflicting) continue;
+                    var boundaries = new ArrayList<Instant>();
+                    boundaries.add(effective);
+                    history.stream().map(HistorySnapshot::validFrom).filter(time -> !time.isBefore(effective)).forEach(boundaries::add);
+                    if (boundaries.stream().anyMatch(time -> TemporalHistory.active(TemporalHistory.at(history, time, recorded)))) {
+                        throw new IllegalStateException("Historical link cardinality overlap");
+                    }
+                }
+            } catch (SQLException failure) { throw sqlError("historical link cardinality", failure); }
+        }
+
         private void requireActiveObject(EntityKey key) {
             ObjectRecord object = findObject(key.type(), key.id());
             if (object == null || object.isDeleted()) throw new IllegalStateException("link endpoint is not active: " + key);
@@ -616,7 +770,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
         private void insertObjectHistory(String type, String id, long version, EntityOperation operation,
                                          Instant validFrom, Instant validTo, Instant recordedAt, Map<String, Object> state) throws SQLException {
-            String sql = "INSERT INTO of_object_history (tenant_id, object_type, object_id, version, operation, valid_from, valid_to, recorded_at, transaction_id, action_id, actor_id, source_system, state_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?)";
+            String sql = "INSERT INTO of_object_history (tenant_id, object_type, object_id, version, operation, valid_from, valid_to, recorded_at, transaction_id, action_id, actor_id, source_system, state_json, temporal_format) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, 2)";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, context.tenantId()); statement.setString(2, type); statement.setString(3, id); statement.setLong(4, version); statement.setString(5, operation.name());
                 statement.setTimestamp(6, timestamp(validFrom)); setNullableTimestamp(statement, 7, validTo); statement.setTimestamp(8, timestamp(recordedAt)); statement.setString(9, transactionId); statement.setString(10, context.actorId()); statement.setString(11, json(state)); statement.executeUpdate();
@@ -625,7 +779,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
         private void insertLinkHistory(String type, String id, EntityKey from, EntityKey to, long version, EntityOperation operation,
                                        Instant validFrom, Instant validTo, Instant recordedAt, Map<String, Object> state) throws SQLException {
-            String sql = "INSERT INTO of_link_history (tenant_id, link_type, link_id, from_type, from_id, to_type, to_id, version, operation, valid_from, valid_to, recorded_at, transaction_id, action_id, actor_id, source_system, state_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?)";
+            String sql = "INSERT INTO of_link_history (tenant_id, link_type, link_id, from_type, from_id, to_type, to_id, version, operation, valid_from, valid_to, recorded_at, transaction_id, action_id, actor_id, source_system, state_json, temporal_format) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, 2)";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, context.tenantId()); statement.setString(2, type); statement.setString(3, id); statement.setString(4, from.type()); statement.setString(5, from.id()); statement.setString(6, to.type()); statement.setString(7, to.id()); statement.setLong(8, version); statement.setString(9, operation.name());
                 statement.setTimestamp(10, timestamp(validFrom)); setNullableTimestamp(statement, 11, validTo); statement.setTimestamp(12, timestamp(recordedAt)); statement.setString(13, transactionId); statement.setString(14, context.actorId()); statement.setString(15, json(state)); statement.executeUpdate();

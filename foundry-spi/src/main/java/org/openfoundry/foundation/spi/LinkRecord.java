@@ -35,8 +35,8 @@ public record LinkRecord(
         Objects.requireNonNull(createdAt, "createdAt must not be null");
         Objects.requireNonNull(updatedAt, "updatedAt must not be null");
         Objects.requireNonNull(validFrom, "validFrom must not be null");
-        if (validTo != null && !validTo.isAfter(validFrom)) {
-            throw new IllegalArgumentException("validTo must be after validFrom");
+        if (validTo != null && validTo.isBefore(validFrom)) {
+            throw new IllegalArgumentException("validTo must not be before validFrom");
         }
         properties = Collections.unmodifiableMap(new LinkedHashMap<>(
                 Objects.requireNonNull(properties, "properties must not be null")));
