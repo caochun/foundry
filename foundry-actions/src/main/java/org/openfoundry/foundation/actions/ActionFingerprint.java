@@ -24,6 +24,15 @@ final class ActionFingerprint {
     private static String encode(Object value) {
         if (value == null) return "null;";
         if (value instanceof ObjectRecord object) return encode(List.of("object", object.tenantId(), object.type(), object.id()));
+        if (value instanceof ActionManifest manifest && manifest.onSideEffectFailure() == ActionManifest.RollbackPolicy.LOG_AND_CONTINUE) {
+            return encode(value.getClass().getName()) + encode(Map.of("action", manifest.action(), "version", manifest.version(),
+                    "reversible", manifest.reversible(), "preconditions", manifest.preconditions(), "effects", manifest.effects()));
+        }
+        // Keep existing durable receipts valid for the legacy direct-ID DeleteLink declaration.
+        if (value instanceof ActionManifest.DeleteLink deletion && deletion.linkId() != null) {
+            return encode(value.getClass().getName()) + encode(Map.of("linkType", deletion.linkType(), "linkId", deletion.linkId()));
+        }
+        if (value instanceof Enum<?> enumeration) return encode(List.of("enum", value.getClass().getName(), enumeration.name()));
         if (value instanceof String text) return "s" + text.length() + ":" + text;
         if (value instanceof Boolean bool) return "b" + bool + ";";
         if (value instanceof Number number) return "n" + number.getClass().getSimpleName() + ":" + number + ";";

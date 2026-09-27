@@ -49,6 +49,8 @@ public final class RestApiRouter {
             return ApiResponse.forbidden();
         } catch (org.openfoundry.foundation.spi.schema.PropertyValidationException invalid) {
             return new ApiResponse(400, Map.of("error", "Property validation failed", "code", invalid.code(), "field", invalid.field()));
+        } catch (org.openfoundry.foundation.actions.LinkResolutionException invalid) {
+            return new ApiResponse(400, Map.of("error", "Relationship selection failed", "code", invalid.code()));
         } catch (IllegalArgumentException invalid) {
             return ApiResponse.badRequest("Invalid Action request");
         }

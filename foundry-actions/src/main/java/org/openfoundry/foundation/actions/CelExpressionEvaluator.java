@@ -25,6 +25,11 @@ public final class CelExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     public boolean evaluate(String expression, Map<String, Object> parameters, ActionActor actor) {
+        return evaluate(expression, parameters, actor, java.time.Instant.now());
+    }
+
+    @Override
+    public boolean evaluate(String expression, Map<String, Object> parameters, ActionActor actor, java.time.Instant now) {
         String normalized = normalize(expression);
         String cacheKey = normalized + "|" + parameters.keySet().stream().sorted().toList();
         Program program = programs.computeIfAbsent(cacheKey, ignored -> compile(normalized, parameters.keySet()));
@@ -37,7 +42,7 @@ public final class CelExpressionEvaluator implements ExpressionEvaluator {
         parameters.forEach((name, value) -> resolved.put(name, celValue(value)));
         activation.put("params", resolved);
         activation.putAll(resolved);
-        activation.put("now", java.time.Instant.now());
+        activation.put("now", now);
         return program.eval(activation).getVal().booleanValue();
     }
 

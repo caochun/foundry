@@ -1,0 +1,1 @@
+Unmodified schema and ReturnBook files from syzygyhack/open-foundry v0.3.0, commit 1d7e1aa62208d32ed91d358f4503cf2d95523a7e, examples/library-pack/. Apache-2.0; license in the parent directory. This fixture covers returning an existing loan, not the BorrowBook event side-effect or complete Pack loading.

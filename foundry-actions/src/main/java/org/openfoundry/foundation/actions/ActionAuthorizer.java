@@ -16,6 +16,13 @@ public interface ActionAuthorizer {
         return allowed(context, actor, definition, parameters);
     }
 
+    /** Validate concrete effects and stored receipt targets, including targets absent from the input parameters. */
+    default boolean allowedChanges(RequestContext context, ActionActor actor, ActionTypeDefinition definition,
+                                   Map<String, Object> parameters, java.util.List<org.openfoundry.foundation.spi.EntityKey> affected,
+                                   org.openfoundry.foundation.spi.Transaction transaction) {
+        return allowed(context, actor, definition, parameters, transaction);
+    }
+
     static ActionAuthorizer denyAll() {
         return (context, actor, definition, parameters) -> false;
     }

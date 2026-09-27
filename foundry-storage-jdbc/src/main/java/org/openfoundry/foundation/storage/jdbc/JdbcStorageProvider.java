@@ -720,6 +720,37 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         }
 
         @Override
+        public List<LinkRecord> findLinks(String type, EntityKey from, EntityKey to) {
+            assertOpen();
+            requireLinkType(type);
+            if (from == null && to == null) throw new IllegalArgumentException("A relationship endpoint is required");
+            String sql = linkSelect() + " WHERE tenant_id = ? AND link_type = ? AND deleted_at IS NULL"
+                    + (from == null ? "" : " AND from_type = ? AND from_id = ?")
+                    + (to == null ? "" : " AND to_type = ? AND to_id = ?") + " ORDER BY link_id";
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, type);
+                int index = 3;
+                if (from != null) {
+                    statement.setString(index++, from.type());
+                    statement.setString(index++, from.id());
+                }
+                if (to != null) {
+                    statement.setString(index++, to.type());
+                    statement.setString(index, to.id());
+                }
+                try (ResultSet result = statement.executeQuery()) {
+                    var rows = new ArrayList<LinkRecord>();
+                    while (result.next()) rows.add(readLink(result));
+                    return List.copyOf(rows);
+                }
+            } catch (SQLException failure) {
+                rollbackOnly = true;
+                throw sqlError("select links in transaction", failure);
+            }
+        }
+
+        @Override
         public org.openfoundry.foundation.spi.CommandReceipt getCommandReceipt(String key) {
             acquireWrite();
             try (var statement = connection.prepareStatement("SELECT actor_id, action_name, request_hash, result_json FROM of_command_receipts WHERE tenant_id = ? AND receipt_key = ?")) {

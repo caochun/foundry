@@ -17,7 +17,7 @@ public final class ActionManifestParser {
             throw new ActionParseException("invalid Action YAML: " + exception.getMessage());
         }
         Map<String, Object> root = map(loaded, "Action manifest must be a mapping");
-        rejectUnknown(root, java.util.Set.of("action", "version", "reversible", "preconditions", "effects"));
+        rejectUnknown(root, java.util.Set.of("action", "version", "reversible", "preconditions", "effects", "rollback"));
         String action = string(root, "action");
         int version = integer(root, "version");
         boolean reversible = root.getOrDefault("reversible", Boolean.FALSE) instanceof Boolean value && value;
@@ -39,18 +39,55 @@ public final class ActionManifestParser {
                 case "updateObject" -> java.util.Set.of("type", "target", "set");
                 case "createObject" -> java.util.Set.of("type", "objectType", "target", "properties");
                 case "createLink" -> java.util.Set.of("type", "linkType", "from", "to", "properties");
-                case "deleteLink" -> java.util.Set.of("type", "linkType", "linkId");
+                case "deleteLink" -> java.util.Set.of("type", "linkType", "linkId", "filter", "expect");
                 default -> throw new ActionParseException("unsupported effect type: " + type);
             });
             effects.add(switch (type) {
                 case "updateObject" -> new ActionManifest.UpdateObject(string(value, "target"), stringMap(value.get("set")));
                 case "createObject" -> new ActionManifest.CreateObject(string(value, "objectType"), string(value, "target"), stringMap(value.get("properties")));
                 case "createLink" -> new ActionManifest.CreateLink(string(value, "linkType"), string(value, "from"), string(value, "to"), stringMap(value.get("properties")));
-                case "deleteLink" -> new ActionManifest.DeleteLink(string(value, "linkType"), string(value, "linkId"));
+                case "deleteLink" -> deleteLink(value);
                 default -> throw new ActionParseException("unsupported effect type: " + type);
             });
         }
-        return new ActionManifest(action, version, reversible, preconditions, effects);
+        var policy = ActionManifest.RollbackPolicy.LOG_AND_CONTINUE;
+        if (root.containsKey("rollback")) {
+            var rollback = map(root.get("rollback"), "rollback must be a mapping");
+            rejectUnknown(rollback, java.util.Set.of("onSideEffectFailure"));
+            try {
+                policy = ActionManifest.RollbackPolicy.valueOf(string(rollback, "onSideEffectFailure"));
+            } catch (IllegalArgumentException invalid) {
+                throw new ActionParseException("Unknown side-effect failure policy");
+            }
+        }
+        return new ActionManifest(action, version, reversible, preconditions, effects, policy);
+    }
+
+    private static ActionManifest.DeleteLink deleteLink(Map<String, Object> value) {
+        boolean direct = value.containsKey("linkId");
+        if (direct == value.containsKey("filter")) {
+            throw new ActionParseException("deleteLink requires exactly one linkId or filter");
+        }
+        var expectation = ActionManifest.LinkExpectation.ONE;
+        if (value.containsKey("expect")) {
+            try {
+                expectation = ActionManifest.LinkExpectation.valueOf(string(value, "expect"));
+            } catch (IllegalArgumentException invalid) {
+                throw new ActionParseException("deleteLink expect must be ONE or ALL");
+            }
+        }
+        if (direct) {
+            if (expectation != ActionManifest.LinkExpectation.ONE) throw new ActionParseException("linkId requires expect ONE");
+            return new ActionManifest.DeleteLink(string(value, "linkType"), string(value, "linkId"));
+        }
+        var filter = map(value.get("filter"), "deleteLink filter must be a mapping");
+        rejectUnknown(filter, java.util.Set.of("from", "to", "active"));
+        if (filter.containsKey("active") && !(filter.get("active") instanceof Boolean)) {
+            throw new ActionParseException("deleteLink active must be a boolean");
+        }
+        return new ActionManifest.DeleteLink(string(value, "linkType"), new ActionManifest.LinkFilter(
+                filter.containsKey("from") ? string(filter, "from") : null,
+                filter.containsKey("to") ? string(filter, "to") : null, (Boolean) filter.get("active")), expectation);
     }
 
     private static void rejectUnknown(Map<String, Object> input, java.util.Set<String> allowed) {

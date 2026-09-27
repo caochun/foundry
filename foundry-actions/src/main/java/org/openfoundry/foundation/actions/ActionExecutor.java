@@ -70,6 +70,10 @@ public final class ActionExecutor {
         if (!new ActionParameterValidator().validate(definition, parameters).isEmpty()) {
             throw new IllegalArgumentException("Action parameters do not match the registered schema");
         }
+        if (!storage.capabilities().transactionalCommandReceipts() && manifest.effects().stream()
+                .anyMatch(effect -> effect instanceof ActionManifest.DeleteLink deletion && deletion.filter() != null)) {
+            throw new UnsupportedOperationException("Filtered relationship deletion requires transactional command execution");
+        }
         validateTenantReferences(context, parameters.values());
         if (!authorizer.allowed(context, actor, definition, parameters)) throw new SecurityException("Action denied");
         if (idempotencyKey != null) {
@@ -81,12 +85,12 @@ public final class ActionExecutor {
                 return executeTransactional(manifest, definition, context, actor, parameters, storage, scoped, fingerprint);
             }
             if (idempotencyStore == null) throw new IllegalStateException("An idempotency store is required for keyed execution");
-            return idempotencyStore.execute(scoped, fingerprint, () -> executeEffects(manifest, context, actor, parameters, storage));
+            return idempotencyStore.execute(scoped, fingerprint, () -> executeEffects(manifest, definition, context, actor, parameters, storage));
         }
         if (storage.capabilities().transactionalCommandReceipts()) {
             return executeTransactional(manifest, definition, context, actor, parameters, storage, null, null);
         }
-        return executeEffects(manifest, context, actor, parameters, storage);
+        return executeEffects(manifest, definition, context, actor, parameters, storage);
     }
 
     private ActionResult executeTransactional(ActionManifest manifest, ActionTypeDefinition definition, RequestContext context,
@@ -104,10 +108,12 @@ public final class ActionExecutor {
                     if (!receipt.action().equals(manifest.action()) || !receipt.requestHash().equals(fingerprint)) {
                         throw new IllegalArgumentException("Idempotency key belongs to a different request or configuration");
                     }
-                    return decodeResult(receipt.result());
+                    var result = decodeResult(receipt.result());
+                    requireChanges(context, actor, definition, resolved, result.affected(), transaction);
+                    return result;
                 }
                 parameters.forEach((name, value) -> checkReferenceVersions(value, resolved.get(name)));
-                ActionResult result = applyEffects(manifest, context, actor, resolved, storage, transaction, true);
+                ActionResult result = applyEffects(manifest, definition, context, actor, resolved, storage, transaction, true);
                 if (!result.success()) return result;
                 if (key != null) {
                     transaction.putCommandReceipt(new org.openfoundry.foundation.spi.CommandReceipt(key, actor.id(), manifest.action(), fingerprint,
@@ -157,21 +163,23 @@ public final class ActionExecutor {
         return new ActionResult(true, actionId, affected);
     }
 
-    private ActionResult executeEffects(ActionManifest manifest, RequestContext context, ActionActor actor,
+    private ActionResult executeEffects(ActionManifest manifest, ActionTypeDefinition definition, RequestContext context, ActionActor actor,
                                         Map<String, Object> parameters, StorageProvider storage) {
         try (Transaction transaction = storage.beginTransaction(context)) {
-            ActionResult result = applyEffects(manifest, context, actor, parameters, storage, transaction, false);
+            ActionResult result = applyEffects(manifest, definition, context, actor, parameters, storage, transaction, false);
             if (result.success()) transaction.commit();
             return result;
         }
     }
 
-    private ActionResult applyEffects(ActionManifest manifest, RequestContext context, ActionActor actor,
+    private ActionResult applyEffects(ActionManifest manifest, ActionTypeDefinition definition, RequestContext context, ActionActor actor,
                                       Map<String, Object> parameters, StorageProvider storage, Transaction transaction,
                                       boolean transactional) {
         String actionId = "act_" + UUID.randomUUID();
+        Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        var expressions = new ActionValues(parameters, actor, now);
         for (ActionManifest.Precondition precondition : manifest.preconditions()) {
-            if (!evaluator.evaluate(precondition.expression(), parameters, actor)) {
+            if (!evaluator.evaluate(precondition.expression(), parameters, actor, now)) {
                 ActionResult result = new ActionResult(false, actionId, List.of());
                 return result;
             }
@@ -180,38 +188,45 @@ public final class ActionExecutor {
         List<EntityKey> affected = new ArrayList<>();
         for (ActionManifest.ActionEffect effect : manifest.effects()) {
             if (effect instanceof ActionManifest.UpdateObject update) {
-                ObjectRecord target = object(parameters, update.target());
+                ObjectRecord target = expressions.object(update.target());
                 if (transactional) target = transaction.getObject(target.type(), target.id());
-                Map<String, Object> values = resolveMap(update.set(), parameters);
+                Map<String, Object> values = expressions.properties(update.set());
                 transaction.updateObject(target.type(), target.id(), values, target.version());
                 affected.add(target.key());
             } else if (effect instanceof ActionManifest.CreateObject create) {
-                Map<String, Object> values = resolveMap(create.properties(), parameters);
+                Map<String, Object> values = expressions.properties(create.properties());
                 ObjectRecord created = transaction.createObject(create.objectType(), resolveId(create.target(), parameters), values);
                 affected.add(created.key());
             } else if (effect instanceof ActionManifest.CreateLink create) {
-                EntityKey from = entity(parameters, create.from());
-                EntityKey to = entity(parameters, create.to());
+                EntityKey from = expressions.entity(create.from());
+                EntityKey to = expressions.entity(create.to());
                 LinkRecord link = transaction.createLink(create.linkType(), resolveId(create.linkType(), parameters), from, to,
-                        resolveMap(create.properties(), parameters));
+                        expressions.properties(create.properties()));
                 affected.add(new EntityKey(link.type(), link.id()));
             } else if (effect instanceof ActionManifest.DeleteLink delete) {
-                String linkId = String.valueOf(resolveValue(delete.linkId(), parameters));
-                transaction.deleteLink(delete.linkType(), linkId, transactional ? transaction.getLink(delete.linkType(), linkId).version() : currentLinkVersion(storage, context,
-                        new ActionManifest.DeleteLink(delete.linkType(), linkId)));
-                affected.add(new EntityKey(delete.linkType(), linkId));
+                List<LinkRecord> selected = selectLinks(delete, expressions, context, storage, transaction, transactional);
+                var keys = selected.stream().map(link -> new EntityKey(link.type(), link.id())).toList();
+                requireChanges(context, actor, definition, parameters, keys, transaction);
+                if (delete.expect() == ActionManifest.LinkExpectation.ONE && selected.size() != 1) {
+                    throw new LinkResolutionException(selected.isEmpty() ? "LINK_NOT_FOUND" : "LINK_RESOLUTION_AMBIGUOUS");
+                }
+                for (var link : selected) {
+                    transaction.deleteLink(link.type(), link.id(), link.version());
+                    affected.add(new EntityKey(link.type(), link.id()));
+                }
             }
         }
+
         Map<String, Object> detail = Map.of(
                 "action", manifest.action(),
                 "affected", affected.stream().map(key -> key.type() + "/" + key.id()).toList());
         transaction.appendAudit(new AuditEntry(
-                "audit_" + actionId, Instant.now(), context.tenantId(), actor.id(),
+                "audit_" + actionId, now, context.tenantId(), actor.id(),
                 "action", null, null, manifest.action(), transaction.transactionId(),
                 "success", detail));
         transaction.enqueueOutbox(new OutboxEntry(
                 "event_" + actionId, context.tenantId(), "openfoundry.action.completed",
-                manifest.action() + "/" + actionId, Instant.now(), transaction.transactionId(), detail));
+                manifest.action() + "/" + actionId, now, transaction.transactionId(), detail));
         return new ActionResult(true, actionId, affected);
     }
 
@@ -235,23 +250,28 @@ public final class ActionExecutor {
         }
     }
 
-    private static long currentLinkVersion(StorageProvider storage, RequestContext context, ActionManifest.DeleteLink effect) {
-        LinkRecord link = storage.getLink(context, effect.linkType(), effect.linkId());
-        if (link == null) throw new IllegalArgumentException("link not found: " + effect.linkType() + ":" + effect.linkId());
-        return link.version();
+    private void requireChanges(RequestContext context, ActionActor actor, ActionTypeDefinition definition,
+                                Map<String, Object> parameters, List<EntityKey> affected, Transaction transaction) {
+        if (!authorizer.allowedChanges(context, actor, definition, parameters, affected, transaction)) {
+            throw new SecurityException("Action effect or replay denied");
+        }
     }
 
-    private static ObjectRecord object(Map<String, Object> parameters, String name) {
-        Object value = parameters.get(name);
-        if (!(value instanceof ObjectRecord object)) throw new IllegalArgumentException("Action parameter is not an object: " + name);
-        return object;
-    }
-
-    private static EntityKey entity(Map<String, Object> parameters, String name) {
-        Object value = parameters.get(name);
-        if (value instanceof ObjectRecord object) return object.key();
-        if (value instanceof EntityKey key) return key;
-        throw new IllegalArgumentException("Action endpoint is not an object: " + name);
+    private static List<LinkRecord> selectLinks(ActionManifest.DeleteLink deletion, ActionValues expressions,
+                                                 RequestContext context, StorageProvider storage, Transaction transaction,
+                                                 boolean transactional) {
+        if (deletion.linkId() != null) {
+            Object value = expressions.value(deletion.linkId());
+            if (!(value instanceof String id) || id.isBlank()) throw new IllegalArgumentException("Link ID must resolve to a string");
+            var link = transactional ? transaction.getLink(deletion.linkType(), id) : storage.getLink(context, deletion.linkType(), id);
+            return link == null || link.isDeleted() ? List.of() : List.of(link);
+        }
+        var filter = deletion.filter();
+        EntityKey from = filter.from() == null ? null : expressions.entity(filter.from());
+        EntityKey to = filter.to() == null ? null : expressions.entity(filter.to());
+        if (from == null && to == null) return List.of();
+        // Upstream starts with current active links. active=false does not re-delete terminated links.
+        return transaction.findLinks(deletion.linkType(), from, to);
     }
 
     private static String resolveId(String reference, Map<String, Object> parameters) {
@@ -265,21 +285,4 @@ public final class ActionExecutor {
         return reference + "-" + UUID.randomUUID();
     }
 
-    private static Map<String, Object> resolveMap(Map<String, String> source, Map<String, Object> parameters) {
-        Map<String, Object> result = new HashMap<>();
-        source.forEach((key, value) -> result.put(key, resolveValue(value, parameters)));
-        return result;
-    }
-
-    private static Object resolveValue(String value, Map<String, Object> parameters) {
-        if (value.startsWith("params.")) return parameters.get(value.substring("params.".length()));
-        int dot = value.indexOf('.');
-        if (dot > 0 && parameters.containsKey(value.substring(0, dot))) {
-            Object current = parameters.get(value.substring(0, dot));
-            String field = value.substring(dot + 1);
-            if (current instanceof ObjectRecord object && field.equals("id")) return object.id();
-            if (current instanceof ObjectRecord object) return object.properties().get(field);
-        }
-        return value;
-    }
 }

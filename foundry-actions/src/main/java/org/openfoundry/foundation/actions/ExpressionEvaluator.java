@@ -8,6 +8,10 @@ import java.util.Map;
 public interface ExpressionEvaluator {
     boolean evaluate(String expression, Map<String, Object> parameters, ActionActor actor);
 
+    default boolean evaluate(String expression, Map<String, Object> parameters, ActionActor actor, java.time.Instant now) {
+        return evaluate(expression, parameters, actor);
+    }
+
     static ExpressionEvaluator simple() {
         return (expression, parameters, actor) -> SimpleExpressions.evaluate(expression, parameters, actor);
     }

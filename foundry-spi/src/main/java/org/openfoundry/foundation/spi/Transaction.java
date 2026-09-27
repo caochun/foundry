@@ -59,6 +59,11 @@ public interface Transaction extends AutoCloseable {
         throw new UnsupportedOperationException("Transactional reads are not supported");
     }
 
+    /** Active links in this transaction, including preceding writes. At least one endpoint is required. */
+    default java.util.List<LinkRecord> findLinks(String type, EntityKey from, EntityKey to) {
+        throw new UnsupportedOperationException("Transactional relationship selection is not supported");
+    }
+
     default CommandReceipt getCommandReceipt(String key) {
         throw new UnsupportedOperationException("Transactional command receipts are not supported");
     }

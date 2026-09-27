@@ -29,6 +29,7 @@ public final class ApplicationService {
     private final Map<String, List<PropertyDefinition>> properties;
     private final Map<String, FieldPolicy> fieldPolicies;
     private final Map<String, Map<String, LinkFieldDefinition>> linkFields;
+    private final Set<String> relationTypes;
 
     /** Legacy construction is metadata-only and cannot execute Actions without trusted registration. */
     public ApplicationService(StorageProvider storage, AuthorizationService authorization, ActionExecutor actions) {
@@ -57,6 +58,8 @@ public final class ApplicationService {
             schema.linkTypes().forEach(type -> navigation.put(type.name(), indexLinkFields(type.linkFields())));
         }
         this.linkFields = Map.copyOf(navigation);
+        this.relationTypes = schema == null ? Set.of() : schema.linkTypes().stream()
+                .map(org.openfoundry.foundation.spi.schema.LinkTypeDefinition::name).collect(Collectors.toUnmodifiableSet());
         this.manifests.forEach((name, manifest) -> {
             var definition = definitions.get(name);
             if (!name.equals(manifest.action()) || definition == null || definition.permission() == null) {
@@ -181,10 +184,26 @@ public final class ApplicationService {
                 return check(ctx, type, values, transaction);
             }
 
+            @Override
+            public boolean allowedChanges(RequestContext ctx, ActionActor actor, ActionTypeDefinition type,
+                                          Map<String, Object> values, List<EntityKey> affected, Transaction transaction) {
+                if (!check(ctx, type, values, transaction)) return false;
+                for (var key : affected) {
+                    if (!properties.containsKey(key.type()) || !authorization.check(ctx, principal, type.permission(), key)) return false;
+                    if (relationTypes.contains(key.type())) {
+                        var link = transaction.getLink(key.type(), key.id());
+                        if (link == null || !authorization.check(ctx, principal, type.permission(), link.from())
+                                || !authorization.check(ctx, principal, type.permission(), link.to())) return false;
+                    } else if (transaction.getObject(key.type(), key.id()) == null) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
             private boolean check(RequestContext ctx, ActionTypeDefinition type, Map<String, Object> values, Transaction transaction) {
                 return authorization.check(ctx, principal, type.permission(), new EntityKey("ActionType", type.name()))
-                        && permittedReferences(ctx, principal, type.permission(), values.values())
-                        && permittedDeletions(ctx, principal, type.permission(), registered, values, transaction);
+                        && permittedReferences(ctx, principal, type.permission(), values.values());
             }
         };
         return actions.withAuthorization(policy).execute(registered, definition, context, new ActionActor(principal.id(), principal.roles()),
@@ -212,23 +231,6 @@ public final class ApplicationService {
         for (Object value : values) {
             if (value instanceof ObjectRecord object && !authorization.check(context, principal, permission, object.key())) return false;
             if (value instanceof List<?> list && !permittedReferences(context, principal, permission, list)) return false;
-        }
-        return true;
-    }
-
-    private boolean permittedDeletions(RequestContext context, SecurityPrincipal principal, String permission,
-                                       ActionManifest manifest, Map<String, Object> parameters, Transaction transaction) {
-        for (var effect : manifest.effects()) {
-            if (effect instanceof ActionManifest.DeleteLink deletion) {
-                String reference = deletion.linkId();
-                Object value = reference.startsWith("params.") ? parameters.get(reference.substring(7)) : reference;
-                if (!(value instanceof String id)) return false;
-                var link = transaction == null ? storage.getLink(context, deletion.linkType(), id) : transaction.getLink(deletion.linkType(), id);
-                if (link == null
-                        || !authorization.check(context, principal, permission, new EntityKey(link.type(), link.id()))
-                        || !authorization.check(context, principal, permission, link.from())
-                        || !authorization.check(context, principal, permission, link.to())) return false;
-            }
         }
         return true;
     }
