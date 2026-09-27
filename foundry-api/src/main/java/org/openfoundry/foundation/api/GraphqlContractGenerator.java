@@ -11,11 +11,19 @@ public final class GraphqlContractGenerator {
         for (var type : schema.interfaces()) {
             result.append("interface ").append(type.name()).append(implementsTypes(type.interfaces())).append(" {\n");
             type.properties().forEach(property -> appendProperty(result, property));
+            type.linkFields().forEach(field -> appendLinkField(result, field));
             result.append("}\n\n");
         }
         for (ObjectTypeDefinition object : schema.objectTypes()) {
             result.append("type ").append(object.name()).append(implementsTypes(object.interfaces())).append(" {\n");
             object.properties().forEach(property -> appendProperty(result, property));
+            object.linkFields().forEach(field -> appendLinkField(result, field));
+            result.append("}\n\n");
+        }
+        for (var type : schema.linkTypes()) {
+            result.append("type ").append(type.name()).append(implementsTypes(type.interfaces())).append(" {\n");
+            type.properties().forEach(property -> appendProperty(result, property));
+            type.linkFields().forEach(field -> appendLinkField(result, field));
             result.append("}\n\n");
         }
         result.append("type Query {\n");
@@ -37,6 +45,12 @@ public final class GraphqlContractGenerator {
 
     private static void appendProperty(StringBuilder result, org.openfoundry.foundation.spi.schema.PropertyDefinition property) {
         result.append("  ").append(property.name()).append(": ").append(property.type()).append(property.primary() ? "!" : "").append("\n");
+    }
+
+    private static void appendLinkField(StringBuilder result, org.openfoundry.foundation.spi.schema.LinkFieldDefinition field) {
+        result.append("  ").append(field.name());
+        if (field.many()) result.append("(first: Int = 100, offset: Int = 0)");
+        result.append(": ").append(field.type()).append("\n");
     }
 
     private static String lower(String value) { return Character.toLowerCase(value.charAt(0)) + value.substring(1); }

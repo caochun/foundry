@@ -42,6 +42,7 @@ public final class SchemaDiffer {
                 var old = oldTypes.get(name);
                 var current = newTypes.get(name);
                 compareProperties("object." + name, old.properties(), current.properties(), changes);
+                compareLinkFields("object." + name, old.linkFields(), current.linkFields(), changes);
                 if (!old.constraints().equals(current.constraints()) || !old.interfaces().equals(current.interfaces())) {
                     changes.add(new SchemaChange("object." + name, "type constraints or interfaces changed", MigrationClass.BREAKING));
                 }
@@ -69,6 +70,7 @@ public final class SchemaDiffer {
                 changes.add(new SchemaChange("link." + name, "relationship endpoints or cardinality changed", MigrationClass.BREAKING));
             }
             compareProperties("link." + name, old.properties(), current.properties(), changes);
+            compareLinkFields("link." + name, old.linkFields(), current.linkFields(), changes);
             if (!old.constraints().equals(current.constraints()) || !old.interfaces().equals(current.interfaces())) {
                 changes.add(new SchemaChange("link." + name, "type constraints or interfaces changed", MigrationClass.BREAKING));
             }
@@ -76,6 +78,21 @@ public final class SchemaDiffer {
         for (String name : oldTypes.keySet()) {
             if (!newTypes.containsKey(name)) changes.add(new SchemaChange("link." + name, "link type removed", MigrationClass.BREAKING));
         }
+    }
+
+    private void compareLinkFields(String owner, List<org.openfoundry.foundation.spi.schema.LinkFieldDefinition> previous,
+                                   List<org.openfoundry.foundation.spi.schema.LinkFieldDefinition> next, List<SchemaChange> changes) {
+        var old = new HashMap<String, org.openfoundry.foundation.spi.schema.LinkFieldDefinition>();
+        previous.forEach(field -> old.put(field.name(), field));
+        for (var field : next) {
+            var before = old.remove(field.name());
+            if (before == null) {
+                changes.add(new SchemaChange(owner + "." + field.name(), "relationship projection added", MigrationClass.SAFE));
+            } else if (!before.equals(field)) {
+                changes.add(new SchemaChange(owner + "." + field.name(), "relationship projection changed", MigrationClass.BREAKING));
+            }
+        }
+        old.keySet().forEach(name -> changes.add(new SchemaChange(owner + "." + name, "relationship projection removed", MigrationClass.BREAKING)));
     }
 
     private void compareActions(OntologySchema previous, OntologySchema next, List<SchemaChange> changes) {

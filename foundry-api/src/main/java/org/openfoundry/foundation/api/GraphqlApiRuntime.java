@@ -12,6 +12,9 @@ import graphql.schema.GraphQLObjectType;
 import graphql.schema.GraphQLSchema;
 import graphql.schema.GraphQLOutputType;
 import org.openfoundry.foundation.spi.ObjectRecord;
+import org.openfoundry.foundation.spi.LinkRecord;
+import org.openfoundry.foundation.spi.EntityKey;
+import org.openfoundry.foundation.spi.schema.LinkFieldDefinition;
 import org.openfoundry.foundation.spi.QueryOptions;
 import org.openfoundry.foundation.spi.schema.ObjectTypeDefinition;
 import org.openfoundry.foundation.spi.schema.OntologySchema;
@@ -43,9 +46,10 @@ public final class GraphqlApiRuntime {
         Map<String, graphql.schema.GraphQLInterfaceType> interfaces = new java.util.LinkedHashMap<>();
         for (var definition : schema.interfaces()) {
             var iface = graphql.schema.GraphQLInterfaceType.newInterface().name(definition.name())
-                    .typeResolver(environment -> environment.getSchema().getObjectType(((ObjectRecord) environment.getObject()).type()));
+                    .typeResolver(environment -> environment.getSchema().getObjectType(entityType(environment.getObject())));
             definition.interfaces().forEach(name -> iface.withInterface(graphql.schema.GraphQLTypeReference.typeRef(name)));
             definition.properties().forEach(property -> iface.field(field(property, enums)));
+            definition.linkFields().forEach(property -> iface.field(linkField(property, application)));
             interfaces.put(definition.name(), iface.build());
         }
         Map<String, GraphQLObjectType> objectTypes = new java.util.LinkedHashMap<>();
@@ -53,7 +57,17 @@ public final class GraphqlApiRuntime {
             GraphQLObjectType.Builder object = GraphQLObjectType.newObject().name(definition.name());
             definition.interfaces().forEach(name -> object.withInterface(interfaces.get(name)));
             definition.properties().forEach(property -> object.field(field(property, enums)));
+            definition.linkFields().forEach(property -> object.field(linkField(property, application)));
             objectTypes.put(definition.name(), object.build());
+        }
+
+        Map<String, GraphQLObjectType> linkTypes = new java.util.LinkedHashMap<>();
+        for (var definition : schema.linkTypes()) {
+            var link = GraphQLObjectType.newObject().name(definition.name());
+            definition.interfaces().forEach(name -> link.withInterface(interfaces.get(name)));
+            definition.properties().forEach(property -> link.field(field(property, enums)));
+            definition.linkFields().forEach(property -> link.field(linkField(property, application)));
+            linkTypes.put(definition.name(), link.build());
         }
 
         GraphQLObjectType.Builder query = GraphQLObjectType.newObject().name("Query");
@@ -103,6 +117,7 @@ public final class GraphqlApiRuntime {
         if (!manifests.isEmpty()) graphQLSchema.mutation(mutation.build());
         graphQLSchema.additionalTypes(new java.util.HashSet<>(interfaces.values()));
         graphQLSchema.additionalTypes(new java.util.HashSet<>(enums.values()));
+        graphQLSchema.additionalTypes(new java.util.HashSet<>(linkTypes.values()));
         return GraphQL.newGraphQL(graphQLSchema.build()).build();
     }
 
@@ -116,8 +131,40 @@ public final class GraphqlApiRuntime {
         GraphQLOutputType type = scalar(property.type(), enums);
         if (property.primary()) type = GraphQLNonNull.nonNull(type);
         return GraphQLFieldDefinition.newFieldDefinition().name(property.name()).type(type).dataFetcher(environment -> {
-            ObjectRecord record = environment.getSource();
-            return property.primary() ? record.id() : record.properties().get(property.name());
+            Object source = environment.getSource();
+            if (source instanceof ObjectRecord record) {
+                return property.primary() ? record.id() : record.properties().get(property.name());
+            }
+            if (source instanceof LinkRecord record) {
+                return property.primary() ? record.id() : record.properties().get(property.name());
+            }
+            throw new IllegalStateException("Unsupported GraphQL entity source");
+        }).build();
+    }
+
+    private static String entityType(Object source) {
+        if (source instanceof ObjectRecord object) return object.type();
+        if (source instanceof LinkRecord link) return link.type();
+        throw new IllegalStateException("Unsupported GraphQL entity source");
+    }
+
+    private static GraphQLFieldDefinition linkField(LinkFieldDefinition field, ApplicationService application) {
+        GraphQLOutputType type = graphql.schema.GraphQLTypeReference.typeRef(field.targetType());
+        if (field.many()) {
+            if (field.type().endsWith("!]")) type = GraphQLNonNull.nonNull(type);
+            type = GraphQLList.list(type);
+        }
+        var builder = GraphQLFieldDefinition.newFieldDefinition().name(field.name()).type(type);
+        if (field.many()) {
+            builder.argument(GraphQLArgument.newArgument().name("first").type(Scalars.GraphQLInt).defaultValue(100));
+            builder.argument(GraphQLArgument.newArgument().name("offset").type(Scalars.GraphQLInt).defaultValue(0));
+        }
+        return builder.dataFetcher(environment -> {
+            var request = request(environment);
+            ObjectRecord source = environment.getSource();
+            return application.readLinkField(request.request(), request.principal(), source.key(), field.name(),
+                    new QueryOptions(environment.getArgumentOrDefault("first", 100),
+                            environment.getArgumentOrDefault("offset", 0), null, null, false));
         }).build();
     }
 

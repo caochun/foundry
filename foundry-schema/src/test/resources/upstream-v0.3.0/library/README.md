@@ -1,0 +1,1 @@
+Unmodified schema files from syzygyhack/open-foundry v0.3.0, commit 1d7e1aa62208d32ed91d358f4503cf2d95523a7e, examples/library-pack/schema/. Retained as portable upstream compatibility fixtures. Upstream license: Apache-2.0; see LICENSE in the source repository.

@@ -34,6 +34,7 @@ public final class PropertyValues {
         for (var link : schema.linkTypes()) {
             if (!objectNames.contains(link.fromType()) || !objectNames.contains(link.toType())) throw new IllegalArgumentException("Unknown relationship endpoint type");
         }
+        requireLinkFields(schema);
         var interfaces = new LinkedHashMap<String, InterfaceDefinition>();
         schema.interfaces().forEach(type -> interfaces.put(type.name(), type));
         var completed = new java.util.HashSet<String>();
@@ -48,6 +49,57 @@ public final class PropertyValues {
         for (var type : schema.linkTypes()) {
             requireFields(schema, type.properties(), true);
             requireInheritance(type.properties(), type.interfaces(), type.constraints(), interfaces);
+        }
+    }
+
+    private static void requireLinkFields(OntologySchema schema) {
+        var links = new LinkedHashMap<String, LinkTypeDefinition>();
+        schema.linkTypes().forEach(link -> links.put(link.name(), link));
+        var interfaces = new LinkedHashMap<String, InterfaceDefinition>();
+        schema.interfaces().forEach(type -> interfaces.put(type.name(), type));
+        for (var type : schema.interfaces()) {
+            requireLinkFields(null, type.properties(), type.linkFields(), type.interfaces(), links, interfaces);
+        }
+        for (var type : schema.objectTypes()) {
+            requireLinkFields(type.name(), type.properties(), type.linkFields(), type.interfaces(), links, interfaces);
+        }
+        for (var type : schema.linkTypes()) {
+            requireLinkFields(type.name(), type.properties(), type.linkFields(), type.interfaces(), links, interfaces);
+        }
+    }
+
+    private static void requireLinkFields(String owner, List<PropertyDefinition> properties,
+                                          List<LinkFieldDefinition> fields, List<String> parents,
+                                          Map<String, LinkTypeDefinition> links, Map<String, InterfaceDefinition> interfaces) {
+        var names = new java.util.HashSet<String>();
+        properties.forEach(field -> names.add(field.name()));
+        for (String parentName : parents) {
+            var parent = interfaces.get(parentName);
+            if (parent == null || !fields.containsAll(parent.linkFields())) {
+                throw new IllegalArgumentException("Unresolved relationship field inheritance: " + parentName);
+            }
+        }
+        for (var field : fields) {
+            if (!names.add(field.name())) {
+                throw new IllegalArgumentException("Duplicate property or relationship field: " + field.name());
+            }
+            var link = links.get(field.linkType());
+            if (link == null) throw new IllegalArgumentException("Unknown relationship type: " + field.linkType());
+            boolean outbound = field.direction() == org.openfoundry.foundation.spi.StorageProvider.Direction.OUTBOUND;
+            String source = outbound ? link.fromType() : link.toType();
+            String target = outbound ? link.toType() : link.fromType();
+            if (owner != null && !source.equals(owner)) {
+                throw new IllegalArgumentException("Relationship field direction does not match its owner: " + field.name());
+            }
+            if (!field.targetType().equals(target) && !field.targetType().equals(link.name())) {
+                throw new IllegalArgumentException("Relationship field must return its opposite endpoint or the link: " + field.name());
+            }
+            boolean single = link.cardinality() == Cardinality.ONE_TO_ONE
+                    || outbound && link.cardinality() == Cardinality.MANY_TO_ONE
+                    || !outbound && link.cardinality() == Cardinality.ONE_TO_MANY;
+            if (!field.many() && !single) {
+                throw new IllegalArgumentException("Relationship cardinality requires a list field: " + field.name());
+            }
         }
     }
 
