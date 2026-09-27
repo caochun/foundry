@@ -78,11 +78,13 @@ public final class OdlParser {
     }
 
     private static ActionTypeDefinition parseAction(graphql.language.ObjectTypeDefinition definition) {
+        Directive directive = requiredDirective(definition, "actionType");
+        String permission = directive.getArgument("permission") == null ? null : requiredStringArgument(directive, "permission");
         return new ActionTypeDefinition(definition.getName(), definition.getFieldDefinitions().stream()
                 .filter(field -> hasDirective(field, "param"))
                 .map(field -> new ActionParameter(field.getName(), typeName(field.getType()),
                         field.getType() instanceof NonNullType))
-                .toList());
+                .toList(), permission);
     }
 
     private static PropertyDefinition parseProperty(FieldDefinition field) {

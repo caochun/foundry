@@ -2,6 +2,12 @@
 
 Open Foundry is a domain-neutral Java foundation for object, relationship, temporal state, governed actions, authorization, audit, events and synchronization. Business concepts arrive through Domain Packs; the platform does not contain a specific government or healthcare workflow.
 
+## Current implementation boundary
+
+This is a partial Java remake of `syzygyhack/open-foundry`, not yet feature-equivalent to upstream v0.3.0. The original v0.1 checklist is superseded by the [parity repair plan](spec/upstream-parity-plan.md). Storage property constraints, complete temporal write semantics, durable Action idempotency, advanced queries and full ODL remain unfinished.
+
+The generic API now requires trusted schema/manifest registration for Actions, explicit permission relations and matching tenant/actor context. Direct ActionExecutor use requires an explicit authorization policy; default execution is denied. Registered reads hide sensitive fields by default and apply role-based field policies to current and historical values. The in-memory idempotency store is process-local only. See [ADR-0004](spec/adr/0004-upstream-parity-and-governed-boundary.md) for API and OpenFGA tuple migration requirements.
+
 ## Build
 
 The project targets Java 21 and is verified with newer JDKs.

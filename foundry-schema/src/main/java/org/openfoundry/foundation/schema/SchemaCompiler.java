@@ -68,6 +68,7 @@ public final class SchemaCompiler {
             }
             Set<String> parameterNames = new HashSet<>();
             for (ActionParameter parameter : action.parameters()) {
+                if (Set.of("actor", "params", "now").contains(parameter.name())) issues.add("reserved Action parameter: " + parameter.name());
                 if (!parameterNames.add(parameter.name())) {
                     issues.add("duplicate parameter " + parameter.name() + " in action " + action.name());
                 }
@@ -115,6 +116,7 @@ public final class SchemaCompiler {
                         .append(type.cardinality()).append(properties(type.properties())));
         schema.actionTypes().stream().sorted(java.util.Comparator.comparing(ActionTypeDefinition::name))
                 .forEach(type -> result.append("|A:").append(type.name()).append(':')
+                        .append(type.permission()).append(':')
                         .append(type.parameters().stream().map(p -> p.name() + ':' + p.type() + ':' + p.required())
                                 .sorted().toList()));
         return result.toString();

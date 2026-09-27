@@ -1,5 +1,7 @@
 # Foundation v0.1 任务清单
 
+本清单保留初始实现记录，不代表上游能力完整或生产验收通过。最新缺口与修复状态以[上游对齐修复计划](upstream-parity-plan.md)和ADR-0004为准。
+
 ## 规约和工程基线
 
 - [x] 评审并冻结 Foundation Constitution（ADR-0003）。

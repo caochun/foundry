@@ -41,8 +41,9 @@ public final class GraphqlApiRuntime {
             for (PropertyDefinition property : definition.properties()) {
                 if (property.primary()) continue;
                 GraphQLOutputType type = scalar(property.type());
-                if (property.required()) type = GraphQLNonNull.nonNull(type);
-                object.field(GraphQLFieldDefinition.newFieldDefinition().name(property.name()).type(type).build());
+                // Protected fields may be absent even when the stored value is required.
+                object.field(GraphQLFieldDefinition.newFieldDefinition().name(property.name()).type(type)
+                        .dataFetcher(env -> ((ObjectRecord) env.getSource()).properties().get(property.name())).build());
             }
             objectTypes.put(definition.name(), object.build());
         }
@@ -87,7 +88,7 @@ public final class GraphqlApiRuntime {
                             throw new IllegalArgumentException("Action input must be valid JSON", exception);
                         }
                         String key = environment.getGraphQlContext().get("idempotencyKey");
-                        return String.valueOf(application.execute(manifest, request.request(), request.principal(), input, key));
+                        return new ObjectMapper().writeValueAsString(application.execute(manifest, request.request(), request.principal(), input, key));
                     }).build());
         }
         GraphQLSchema.Builder graphQLSchema = GraphQLSchema.newSchema().query(query.build());

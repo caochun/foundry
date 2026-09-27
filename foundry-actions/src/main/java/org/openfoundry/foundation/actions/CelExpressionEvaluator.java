@@ -33,10 +33,29 @@ public final class CelExpressionEvaluator implements ExpressionEvaluator {
         actorValue.put("id", actor.id());
         actorValue.put("roles", actor.roles().stream().toList());
         activation.put("actor", actorValue);
-        activation.put("params", parameters);
-        activation.putAll(parameters);
+        Map<String, Object> resolved = new HashMap<>();
+        parameters.forEach((name, value) -> resolved.put(name, celValue(value)));
+        activation.put("params", resolved);
+        activation.putAll(resolved);
         activation.put("now", java.time.Instant.now());
         return program.eval(activation).getVal().booleanValue();
+    }
+
+    private static Object celValue(Object value) {
+        if (value instanceof ObjectRecord object) {
+            var fields = new HashMap<String, Object>();
+            object.properties().forEach((name, field) -> fields.put(name, celValue(field)));
+            fields.put("id", object.id());
+            fields.put("_version", object.version());
+            return fields;
+        }
+        if (value instanceof Map<?, ?> map) {
+            var fields = new HashMap<String, Object>();
+            map.forEach((name, field) -> fields.put(name.toString(), celValue(field)));
+            return fields;
+        }
+        if (value instanceof java.util.List<?> list) return list.stream().map(CelExpressionEvaluator::celValue).toList();
+        return value;
     }
 
     private Program compile(String expression, java.util.Set<String> parameterNames) {

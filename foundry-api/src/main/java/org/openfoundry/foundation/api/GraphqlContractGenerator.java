@@ -11,7 +11,7 @@ public final class GraphqlContractGenerator {
         for (ObjectTypeDefinition object : schema.objectTypes()) {
             result.append("type ").append(object.name()).append(" {\n");
             object.properties().forEach(property -> result.append("  ").append(property.name()).append(": ")
-                    .append(graphqlType(property.type())).append(property.required() ? "!" : "").append("\n"));
+                    .append(graphqlType(property.type())).append(property.primary() && property.required() ? "!" : "").append("\n"));
             result.append("}\n\n");
         }
         result.append("type Query {\n");

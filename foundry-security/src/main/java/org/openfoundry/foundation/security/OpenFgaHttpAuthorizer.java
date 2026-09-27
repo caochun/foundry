@@ -14,9 +14,10 @@ public final class OpenFgaHttpAuthorizer implements RelationshipAuthorizer {
     private final HttpClient client;
     private final ObjectMapper mapper;
     private final URI checkUri;
+    private final String authorizationModelId;
 
     public OpenFgaHttpAuthorizer(URI endpoint, String storeId, String authorizationModelId) {
-        this(HttpClient.newHttpClient(), new ObjectMapper(), endpoint, storeId, authorizationModelId);
+        this(HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build(), new ObjectMapper(), endpoint, storeId, authorizationModelId);
     }
 
     OpenFgaHttpAuthorizer(HttpClient client, ObjectMapper mapper, URI endpoint,
@@ -24,20 +25,25 @@ public final class OpenFgaHttpAuthorizer implements RelationshipAuthorizer {
         this.client = client;
         this.mapper = mapper;
         String base = endpoint.toString().replaceAll("/$", "");
-        this.checkUri = URI.create(base + "/stores/" + storeId + "/authorization-models/"
-                + authorizationModelId + "/check");
+        if (storeId == null || !storeId.matches("[A-Za-z0-9_-]+") || authorizationModelId == null || authorizationModelId.isBlank()) {
+            throw new IllegalArgumentException("OpenFGA store and authorization model are required");
+        }
+        this.authorizationModelId = authorizationModelId;
+        this.checkUri = URI.create(base + "/stores/" + storeId + "/check");
     }
 
     @Override
     public boolean check(SecurityPrincipal principal, String relation, EntityKey resource) {
         try {
             String body = mapper.writeValueAsString(Map.of(
+                    "authorization_model_id", authorizationModelId,
                     "tuple_key", Map.of(
-                            "user", "user:" + principal.id(),
+                            "user", OpenFgaResourceIds.user(principal),
                             "relation", relation,
-                            "object", resource.type() + ":" + resource.id())));
+                            "object", OpenFgaResourceIds.resource(principal.tenantId(), resource))));
             HttpRequest request = HttpRequest.newBuilder(checkUri)
                     .header("content-type", "application/json")
+                    .timeout(java.time.Duration.ofSeconds(5))
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
             HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());

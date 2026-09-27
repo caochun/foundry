@@ -17,13 +17,17 @@ public final class ActionManifestParser {
             throw new ActionParseException("invalid Action YAML: " + exception.getMessage());
         }
         Map<String, Object> root = map(loaded, "Action manifest must be a mapping");
+        rejectUnknown(root, java.util.Set.of("action", "version", "reversible", "preconditions", "effects"));
         String action = string(root, "action");
         int version = integer(root, "version");
         boolean reversible = root.getOrDefault("reversible", Boolean.FALSE) instanceof Boolean value && value;
 
+        if (reversible) throw new ActionParseException("Reversible Actions are not supported yet");
+
         List<ActionManifest.Precondition> preconditions = new ArrayList<>();
         for (Object item : list(root.get("preconditions"))) {
             Map<String, Object> value = map(item, "precondition must be a mapping");
+            rejectUnknown(value, java.util.Set.of("expr", "error"));
             preconditions.add(new ActionManifest.Precondition(string(value, "expr"), string(value, "error")));
         }
 
@@ -31,6 +35,13 @@ public final class ActionManifestParser {
         for (Object item : list(root.get("effects"))) {
             Map<String, Object> value = map(item, "effect must be a mapping");
             String type = string(value, "type");
+            rejectUnknown(value, switch (type) {
+                case "updateObject" -> java.util.Set.of("type", "target", "set");
+                case "createObject" -> java.util.Set.of("type", "objectType", "target", "properties");
+                case "createLink" -> java.util.Set.of("type", "linkType", "from", "to", "properties");
+                case "deleteLink" -> java.util.Set.of("type", "linkType", "linkId");
+                default -> throw new ActionParseException("unsupported effect type: " + type);
+            });
             effects.add(switch (type) {
                 case "updateObject" -> new ActionManifest.UpdateObject(string(value, "target"), stringMap(value.get("set")));
                 case "createObject" -> new ActionManifest.CreateObject(string(value, "objectType"), string(value, "target"), stringMap(value.get("properties")));
@@ -40,6 +51,12 @@ public final class ActionManifestParser {
             });
         }
         return new ActionManifest(action, version, reversible, preconditions, effects);
+    }
+
+    private static void rejectUnknown(Map<String, Object> input, java.util.Set<String> allowed) {
+        for (String field : input.keySet()) {
+            if (!allowed.contains(field)) throw new ActionParseException("Unsupported Action field: " + field);
+        }
     }
 
     private static Map<String, Object> map(Object value, String message) {
@@ -71,7 +88,10 @@ public final class ActionManifestParser {
         if (value == null) return Map.of();
         Map<String, Object> raw = map(value, "effect properties must be a mapping");
         Map<String, String> result = new LinkedHashMap<>();
-        raw.forEach((key, item) -> result.put(key, String.valueOf(item)));
+        raw.forEach((key, item) -> {
+            if (!(item instanceof String expression)) throw new ActionParseException("Effect values must be supported string expressions");
+            result.put(key, expression);
+        });
         return result;
     }
 }

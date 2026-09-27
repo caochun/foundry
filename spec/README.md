@@ -4,6 +4,11 @@
 
 本目录记录平台必须保持稳定的概念、数据语义、接口契约和架构决策。具体领域的标签、风险判断、提醒匹配和业务流程属于上层 Domain Pack 与应用，不属于本规约的底座范围。
 
+## 最新修复基线
+
+- [上游对齐修复计划](upstream-parity-plan.md)：取代旧任务勾选作为当前完成度依据。
+- [ADR-0004](adr/0004-upstream-parity-and-governed-boundary.md)：通用执行治理、字段策略和兼容迁移。
+
 ## 阅读顺序
 
 1. [constitution.md](constitution.md)：不可违背的设计原则和范围边界。

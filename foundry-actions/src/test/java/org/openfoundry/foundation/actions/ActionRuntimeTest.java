@@ -46,7 +46,10 @@ class ActionRuntimeTest {
             transaction.commit();
         }
 
-        ActionResult result = new ActionExecutor().execute(manifest, context,
+        var definition = new org.openfoundry.foundation.spi.schema.ActionTypeDefinition("PromotePerson",
+                List.of(new org.openfoundry.foundation.spi.schema.ActionParameter("person", "Person", true)), "can_promote");
+        ActionResult result = new ActionExecutor().withAuthorization((ctx, actor, type, params) -> actor.roles().contains("admin"))
+                .execute(manifest, definition, context,
                 new ActionActor("operator", Set.of("admin")), Map.of("person", person), storage);
 
         assertTrue(result.success());

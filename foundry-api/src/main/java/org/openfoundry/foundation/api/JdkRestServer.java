@@ -44,6 +44,18 @@ public final class JdkRestServer implements AutoCloseable {
     public void close() { server.stop(0); }
 
     private void handle(HttpExchange exchange) throws IOException {
+        try {
+            handleAuthenticated(exchange);
+        } catch (SecurityException denied) {
+            write(exchange, ApiResponse.forbidden());
+        } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException invalid) {
+            write(exchange, ApiResponse.badRequest("Invalid request"));
+        } catch (RuntimeException failure) {
+            write(exchange, new ApiResponse(500, Map.of("error", "request failed")));
+        }
+    }
+
+    private void handleAuthenticated(HttpExchange exchange) throws IOException {
         ApiRequestContext context = requestContext.get();
         ApiResponse response;
         if ("GET".equalsIgnoreCase(exchange.getRequestMethod())) {
@@ -55,7 +67,6 @@ public final class JdkRestServer implements AutoCloseable {
             if (manifest == null) { write(exchange, ApiResponse.notFound()); return; }
             Map<String, Object> input = mapper.readValue(exchange.getRequestBody(), new com.fasterxml.jackson.core.type.TypeReference<>() {});
             String key = exchange.getRequestHeaders().getFirst("Idempotency-Key");
-            if (key == null || key.isBlank()) key = "http-" + java.util.UUID.randomUUID();
             response = router.execute(context.request(), context.principal(), actionName, manifest, input, key);
         } else {
             response = ApiResponse.badRequest("unsupported HTTP method");

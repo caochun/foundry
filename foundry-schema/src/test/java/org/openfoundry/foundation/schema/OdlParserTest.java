@@ -41,6 +41,7 @@ class OdlParserTest {
         assertEquals(1, schema.linkTypes().size());
         assertEquals("Organization", schema.linkTypes().getFirst().toType());
         assertEquals(1, schema.actionTypes().size());
+        assertEquals("can_move", schema.actionTypes().getFirst().permission());
         assertEquals(3, schema.actionTypes().getFirst().parameters().size());
         assertEquals(2, schema.objectTypes().getFirst().properties().size());
     }

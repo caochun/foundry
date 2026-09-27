@@ -36,6 +36,12 @@ public final class RestApiRouter {
                                String actionName, ActionManifest manifest,
                                Map<String, Object> parameters, String idempotencyKey) {
         if (!manifest.action().equals(actionName)) return ApiResponse.badRequest("action name mismatch");
-        return ApiResponse.ok(application.execute(manifest, context, principal, parameters, idempotencyKey));
+        try {
+            return ApiResponse.ok(application.execute(manifest, context, principal, parameters, idempotencyKey));
+        } catch (SecurityException denied) {
+            return ApiResponse.forbidden();
+        } catch (IllegalArgumentException invalid) {
+            return ApiResponse.badRequest("Invalid Action request");
+        }
     }
 }
