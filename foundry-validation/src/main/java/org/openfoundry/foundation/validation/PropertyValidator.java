@@ -40,6 +40,25 @@ public final class PropertyValidator {
         for (String expression : constraints) programs.validate(expression, false);
     }
 
+    /** Restore the mutable part of a captured state; protected values and current schema rules remain authoritative. */
+    public Map<String, Object> restore(OntologySchema schema, List<PropertyDefinition> fields, List<String> constraints,
+                                      String id, Map<String, Object> desired, Map<String, Object> current,
+                                      RequestContext context, Instant recordedAt) {
+        var patch = new LinkedHashMap<>(desired);
+        var retained = new LinkedHashMap<String, Object>();
+        for (var field : fields) {
+            if (!field.primary() && !field.immutable() && !field.readOnly()) continue;
+            boolean generatedUpdate = field.readOnly() && Set.of("updatedAt", "updatedBy").contains(field.name());
+            if (!generatedUpdate && (!java.util.Objects.equals(desired.get(field.name()), current.get(field.name()))
+                    || desired.containsKey(field.name()) != current.containsKey(field.name()))) {
+                throw new PropertyValidationException("PROTECTED_COMPENSATION_PROPERTY", field.name());
+            }
+            patch.remove(field.name());
+            if (current.containsKey(field.name())) retained.put(field.name(), current.get(field.name()));
+        }
+        return validate(schema, fields, constraints, id, patch, retained, context, recordedAt);
+    }
+
     public Map<String, Object> validate(OntologySchema schema, List<PropertyDefinition> fields, List<String> constraints,
                                        String id, Map<String, Object> supplied, Map<String, Object> previous,
                                        RequestContext context, Instant recordedAt) {

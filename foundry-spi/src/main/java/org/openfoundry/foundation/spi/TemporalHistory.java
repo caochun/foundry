@@ -60,13 +60,16 @@ public final class TemporalHistory {
 
     public static LinkRecord link(String tenant, HistorySnapshot snapshot, List<HistorySnapshot> history, Instant recordedTime) {
         var creation = history.stream().min(Comparator.comparingLong(HistorySnapshot::version)).orElseThrow();
-        Instant ended = history.stream().filter(event -> event.operation() == EntityOperation.DELETED)
-                .filter(event -> !event.recordedAt().isAfter(recordedTime)).map(HistorySnapshot::validFrom)
-                .min(Instant::compareTo).orElse(null);
+        var activation = history.stream().filter(event -> event.version() <= snapshot.version())
+                .filter(event -> event.operation() == EntityOperation.CREATED || event.operation() == EntityOperation.RESTORED)
+                .max(Comparator.comparingLong(HistorySnapshot::version)).orElse(creation);
+        Instant ended = history.stream().filter(event -> event.operation() == EntityOperation.DELETED && event.version() > activation.version())
+                .filter(event -> !event.recordedAt().isAfter(recordedTime)).min(Comparator.comparingLong(HistorySnapshot::version))
+                .map(HistorySnapshot::validFrom).orElse(null);
         var properties = new LinkedHashMap<>(snapshot.state());
         for (String key : List.of("_fromType", "_fromId", "_toType", "_toId")) properties.remove(key);
         return new LinkRecord(tenant, snapshot.key().type(), snapshot.key().id(), from(snapshot), to(snapshot), snapshot.version(),
-                creation.recordedAt(), snapshot.recordedAt(), active(snapshot) ? null : snapshot.validFrom(), creation.validFrom(), ended,
+                creation.recordedAt(), snapshot.recordedAt(), active(snapshot) ? null : snapshot.validFrom(), activation.validFrom(), ended,
                 snapshot.transactionId(), snapshot.actionId(), properties);
     }
 

@@ -11,6 +11,7 @@ import java.util.Map;
 /** Simple upstream effect expressions, resolved against one immutable pre-effect context. */
 final class ActionValues {
     private final Map<String, Object> roots;
+    private final Map<String, Object> created = new LinkedHashMap<>();
 
     ActionValues(Map<String, Object> parameters, ActionActor actor, Instant now) {
         var context = new LinkedHashMap<String, Object>(parameters);
@@ -48,13 +49,48 @@ final class ActionValues {
         return Collections.unmodifiableMap(values);
     }
 
+    void created(ObjectRecord object) {
+        String name = Character.toLowerCase(object.type().charAt(0)) + object.type().substring(1);
+        if (!roots.containsKey(name)) created.putIfAbsent(name, object);
+    }
+
+    Map<String, Object> snapshot() {
+        var all = new LinkedHashMap<>(roots);
+        all.putAll(created);
+        return org.openfoundry.foundation.spi.schema.PropertyValues.immutableMap(jsonMap(all));
+    }
+
+    private static Map<String, Object> jsonMap(Map<String, Object> source) {
+        var result = new LinkedHashMap<String, Object>();
+        source.forEach((name, value) -> result.put(name, jsonValue(value)));
+        return result;
+    }
+
+    private static Object jsonValue(Object value) {
+        if (value instanceof ObjectRecord object) {
+            var fields = new LinkedHashMap<>(object.properties());
+            fields.put("id", object.id());
+            fields.put("_id", object.id());
+            fields.put("_type", object.type());
+            fields.put("_version", object.version());
+            return jsonMap(fields);
+        }
+        if (value instanceof Map<?, ?> map) {
+            var fields = new LinkedHashMap<String, Object>();
+            map.forEach((name, item) -> fields.put((String) name, jsonValue(item)));
+            return fields;
+        }
+        if (value instanceof java.util.List<?> list) return list.stream().map(ActionValues::jsonValue).toList();
+        return value;
+    }
+
     private Object reference(String expression) {
         if (expression.startsWith("'") && expression.endsWith("'") && expression.length() >= 2) {
             return expression.substring(1, expression.length() - 1);
         }
         String[] parts = expression.split("\\.", -1);
-        if (!roots.containsKey(parts[0])) return expression;
-        Object current = roots.get(parts[0]);
+        if (!roots.containsKey(parts[0]) && !created.containsKey(parts[0])) return expression;
+        Object current = roots.containsKey(parts[0]) ? roots.get(parts[0]) : created.get(parts[0]);
         for (int i = 1; i < parts.length; i++) {
             String field = parts[i];
             if (current instanceof ObjectRecord object) {

@@ -39,6 +39,16 @@ public final class RestApiRouter {
         return ApiResponse.notFound();
     }
 
+    public ApiResponse resume(RequestContext context, SecurityPrincipal principal, String actionName, String actionId) {
+        try {
+            return ApiResponse.ok(application.resume(context, principal, actionName, actionId));
+        } catch (SecurityException denied) {
+            return ApiResponse.forbidden();
+        } catch (IllegalArgumentException invalid) {
+            return ApiResponse.badRequest("Invalid Action continuation");
+        }
+    }
+
     public ApiResponse execute(RequestContext context, SecurityPrincipal principal,
                                String actionName, ActionManifest manifest,
                                Map<String, Object> parameters, String idempotencyKey) {

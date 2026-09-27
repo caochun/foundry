@@ -39,6 +39,10 @@ public interface StorageProvider {
 
     Transaction beginTransaction(RequestContext context);
 
+    default List<ActionExecution> pendingActions(RequestContext context, Instant now, int limit) {
+        throw new UnsupportedOperationException("Durable action continuations are not supported");
+    }
+
     StorageCapabilities capabilities();
 
     enum Direction {

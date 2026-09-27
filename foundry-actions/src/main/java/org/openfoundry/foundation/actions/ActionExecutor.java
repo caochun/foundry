@@ -22,6 +22,9 @@ public final class ActionExecutor {
     private final ExpressionEvaluator evaluator;
     private final IdempotencyStore idempotencyStore;
     private final ActionAuthorizer authorizer;
+    private final SideEffectHandler sideEffects;
+    private final java.time.Clock clock;
+    private final java.time.Duration lease;
 
     public ActionExecutor() {
         this(new CelExpressionEvaluator(), null);
@@ -36,6 +39,15 @@ public final class ActionExecutor {
     }
 
     public ActionExecutor(ExpressionEvaluator evaluator, IdempotencyStore idempotencyStore, ActionAuthorizer authorizer) {
+        this(evaluator, idempotencyStore, authorizer, null, java.time.Clock.systemUTC(), java.time.Duration.ofMinutes(1));
+    }
+
+    private ActionExecutor(ExpressionEvaluator evaluator, IdempotencyStore idempotencyStore, ActionAuthorizer authorizer,
+                           SideEffectHandler sideEffects, java.time.Clock clock, java.time.Duration lease) {
+        this.sideEffects = sideEffects;
+        this.clock = java.util.Objects.requireNonNull(clock);
+        this.lease = java.util.Objects.requireNonNull(lease);
+        if (lease.compareTo(java.time.Duration.ofMillis(1)) < 0) throw new IllegalArgumentException("Invalid side-effect lease");
         this.evaluator = java.util.Objects.requireNonNull(evaluator);
         this.idempotencyStore = idempotencyStore;
         this.authorizer = java.util.Objects.requireNonNull(authorizer);
@@ -43,7 +55,33 @@ public final class ActionExecutor {
 
     /** Only trusted application wiring may supply policies; no HTTP request can provide one. */
     public ActionExecutor withAuthorization(ActionAuthorizer policy) {
-        return new ActionExecutor(evaluator, idempotencyStore, policy);
+        return new ActionExecutor(evaluator, idempotencyStore, policy, sideEffects, clock, lease);
+    }
+
+    public ActionExecutor withSideEffects(SideEffectHandler handler) {
+        return withSideEffects(handler, clock, lease);
+    }
+
+    public ActionExecutor withSideEffects(SideEffectHandler handler, java.time.Clock clock, java.time.Duration lease) {
+        return new ActionExecutor(evaluator, idempotencyStore, authorizer, java.util.Objects.requireNonNull(handler), clock, lease);
+    }
+
+    public ActionResult resume(ActionManifest manifest, ActionTypeDefinition definition, String actionId,
+                               RequestContext context, ActionActor actor, StorageProvider storage) {
+        return new SideEffectRuntime(sideEffects, authorizer, clock, lease).resume(manifest, definition, actionId, context, actor, storage);
+    }
+
+    public List<ActionResult> resumePending(Map<String, ActionManifest> manifests, Map<String, ActionTypeDefinition> definitions,
+                                            RequestContext context, ActionActor actor, int limit, StorageProvider storage) {
+        if (!java.util.Objects.equals(context.actorId(), actor.id())) throw new SecurityException("Action actor mismatch");
+        var results = new ArrayList<ActionResult>();
+        for (var execution : storage.pendingActions(context, clock.instant(), limit)) {
+            var manifest = manifests.get(execution.action());
+            var definition = definitions.get(execution.action());
+            if (manifest == null || definition == null) throw new IllegalStateException("Original continuation definition is not registered");
+            results.add(resume(manifest, definition, execution.id(), context, actor, storage));
+        }
+        return List.copyOf(results);
     }
 
     public ActionResult execute(ActionManifest manifest, RequestContext context,
@@ -74,6 +112,12 @@ public final class ActionExecutor {
                 .anyMatch(effect -> effect instanceof ActionManifest.DeleteLink deletion && deletion.filter() != null)) {
             throw new UnsupportedOperationException("Filtered relationship deletion requires transactional command execution");
         }
+        if (!manifest.sideEffects().isEmpty()) {
+            if (!storage.capabilities().transactionalCommandReceipts()) throw new UnsupportedOperationException("Side effects require durable action continuations");
+            if (sideEffects == null || manifest.sideEffects().stream().anyMatch(effect -> !sideEffects.supports(effect.type()))) {
+                throw new IllegalStateException("No configured handler for this side effect");
+            }
+        }
         validateTenantReferences(context, parameters.values());
         if (!authorizer.allowed(context, actor, definition, parameters)) throw new SecurityException("Action denied");
         if (idempotencyKey != null) {
@@ -97,6 +141,7 @@ public final class ActionExecutor {
                                                ActionActor actor, Map<String, Object> parameters, StorageProvider storage,
                                                String key, String fingerprint) {
         for (int attempt = 0; attempt < 8; attempt++) {
+            ActionResult committed;
             try (Transaction transaction = storage.beginTransaction(context)) {
                 transaction.acquireWrite();
                 var current = new java.util.LinkedHashMap<String, Object>();
@@ -108,23 +153,34 @@ public final class ActionExecutor {
                     if (!receipt.action().equals(manifest.action()) || !receipt.requestHash().equals(fingerprint)) {
                         throw new IllegalArgumentException("Idempotency key belongs to a different request or configuration");
                     }
-                    var result = decodeResult(receipt.result());
-                    requireChanges(context, actor, definition, resolved, result.affected(), transaction);
-                    return result;
+                    Object format = receipt.result().get("format");
+                    if ((format instanceof Integer || format instanceof Long) && ((Number) format).longValue() == 2) {
+                        var execution = transaction.getActionExecution((String) receipt.result().get("actionId"));
+                        if (execution == null) throw new IllegalStateException("Committed continuation is missing");
+                        committed = ActionContinuationState.result(execution);
+                    } else {
+                        committed = decodeResult(receipt.result());
+                    }
+                    requireChanges(context, actor, definition, resolved, committed.affected(), transaction);
+                } else {
+                    parameters.forEach((name, value) -> checkReferenceVersions(value, resolved.get(name)));
+                    committed = applyEffects(manifest, definition, context, actor, resolved, storage, transaction, true);
+                    if (!committed.success()) return committed;
+                    if (key != null) {
+                        Map<String, Object> result = manifest.sideEffects().isEmpty()
+                                ? Map.of("format", 1, "success", true, "actionId", committed.actionId(), "affected", committed.affected().stream()
+                                        .map(entity -> Map.of("type", entity.type(), "id", entity.id())).toList())
+                                : Map.of("format", 2, "actionId", committed.actionId());
+                        transaction.putCommandReceipt(new org.openfoundry.foundation.spi.CommandReceipt(key, actor.id(), manifest.action(), fingerprint, result));
+                    }
+                    transaction.commit();
                 }
-                parameters.forEach((name, value) -> checkReferenceVersions(value, resolved.get(name)));
-                ActionResult result = applyEffects(manifest, definition, context, actor, resolved, storage, transaction, true);
-                if (!result.success()) return result;
-                if (key != null) {
-                    transaction.putCommandReceipt(new org.openfoundry.foundation.spi.CommandReceipt(key, actor.id(), manifest.action(), fingerprint,
-                            Map.of("format", 1, "success", true, "actionId", result.actionId(), "affected", result.affected().stream()
-                                    .map(entity -> Map.of("type", entity.type(), "id", entity.id())).toList())));
-                }
-                transaction.commit();
-                return result;
             } catch (org.openfoundry.foundation.spi.TransactionConflictException conflict) {
                 if (attempt == 7) throw conflict;
+                continue;
             }
+            // The original transaction and connection must be closed before any external callback.
+            return manifest.sideEffects().isEmpty() ? committed : resume(manifest, definition, committed.actionId(), context, actor, storage);
         }
         throw new IllegalStateException("Transaction retry limit reached");
     }
@@ -176,7 +232,7 @@ public final class ActionExecutor {
                                       Map<String, Object> parameters, StorageProvider storage, Transaction transaction,
                                       boolean transactional) {
         String actionId = "act_" + UUID.randomUUID();
-        Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
         var expressions = new ActionValues(parameters, actor, now);
         for (ActionManifest.Precondition precondition : manifest.preconditions()) {
             if (!evaluator.evaluate(precondition.expression(), parameters, actor, now)) {
@@ -186,22 +242,28 @@ public final class ActionExecutor {
         }
 
         List<EntityKey> affected = new ArrayList<>();
+        var journal = new ArrayList<Map<String, Object>>();
         for (ActionManifest.ActionEffect effect : manifest.effects()) {
             if (effect instanceof ActionManifest.UpdateObject update) {
                 ObjectRecord target = expressions.object(update.target());
                 if (transactional) target = transaction.getObject(target.type(), target.id());
                 Map<String, Object> values = expressions.properties(update.set());
-                transaction.updateObject(target.type(), target.id(), values, target.version());
+                var updated = transaction.updateObject(target.type(), target.id(), values, target.version());
+                journal.add(ActionContinuationState.undo("UPDATE_OBJECT", target.key(), updated.version(), target.properties()));
                 affected.add(target.key());
             } else if (effect instanceof ActionManifest.CreateObject create) {
                 Map<String, Object> values = expressions.properties(create.properties());
-                ObjectRecord created = transaction.createObject(create.objectType(), resolveId(create.target(), parameters), values);
+                String id = create.target() == null ? create.objectType() + "-" + UUID.randomUUID() : resolveId(create.target(), parameters);
+                ObjectRecord created = transaction.createObject(create.objectType(), id, values);
+                expressions.created(created);
+                journal.add(ActionContinuationState.undo("CREATE_OBJECT", created.key(), created.version(), Map.of()));
                 affected.add(created.key());
             } else if (effect instanceof ActionManifest.CreateLink create) {
                 EntityKey from = expressions.entity(create.from());
                 EntityKey to = expressions.entity(create.to());
                 LinkRecord link = transaction.createLink(create.linkType(), resolveId(create.linkType(), parameters), from, to,
                         expressions.properties(create.properties()));
+                journal.add(ActionContinuationState.undo("CREATE_LINK", new EntityKey(link.type(), link.id()), link.version(), Map.of()));
                 affected.add(new EntityKey(link.type(), link.id()));
             } else if (effect instanceof ActionManifest.DeleteLink delete) {
                 List<LinkRecord> selected = selectLinks(delete, expressions, context, storage, transaction, transactional);
@@ -212,20 +274,26 @@ public final class ActionExecutor {
                 }
                 for (var link : selected) {
                     transaction.deleteLink(link.type(), link.id(), link.version());
+                    journal.add(ActionContinuationState.undo("DELETE_LINK", new EntityKey(link.type(), link.id()), link.version() + 1, Map.of()));
                     affected.add(new EntityKey(link.type(), link.id()));
                 }
             }
         }
 
+        boolean continued = !manifest.sideEffects().isEmpty();
+        if (continued) {
+            transaction.putActionExecution(new org.openfoundry.foundation.spi.ActionExecution(actionId, actor.id(), manifest.action(), 1,
+                    "PENDING", now, ActionContinuationState.initial(manifest, definition, parameters, expressions, affected, journal, now, transaction.transactionId())), 0);
+        }
         Map<String, Object> detail = Map.of(
                 "action", manifest.action(),
                 "affected", affected.stream().map(key -> key.type() + "/" + key.id()).toList());
         transaction.appendAudit(new AuditEntry(
                 "audit_" + actionId, now, context.tenantId(), actor.id(),
                 "action", null, null, manifest.action(), transaction.transactionId(),
-                "success", detail));
+                continued ? "effects_committed" : "success", detail));
         transaction.enqueueOutbox(new OutboxEntry(
-                "event_" + actionId, context.tenantId(), "openfoundry.action.completed",
+                "event_" + actionId, context.tenantId(), continued ? "openfoundry.action.effects_committed" : "openfoundry.action.completed",
                 manifest.action() + "/" + actionId, now, transaction.transactionId(), detail));
         return new ActionResult(true, actionId, affected);
     }
@@ -238,7 +306,8 @@ public final class ActionExecutor {
                     invocation.parameters(), invocation.idempotencyKey(), storage));
         }
         int succeeded = (int) results.stream().filter(ActionResult::success).count();
-        return new ActionBatchResult(results, succeeded, results.size() - succeeded);
+        int pending = (int) results.stream().filter(result -> java.util.Set.of("PENDING", "RUNNING", "COMPENSATING").contains(result.status())).count();
+        return new ActionBatchResult(results, succeeded, results.size() - succeeded - pending, pending);
     }
 
     private static void validateTenantReferences(RequestContext context, java.util.Collection<?> values) {

@@ -72,6 +72,28 @@ public interface Transaction extends AutoCloseable {
         throw new UnsupportedOperationException("Transactional command receipts are not supported");
     }
 
+    default java.util.List<LinkRecord> connectedLinks(EntityKey endpoint) {
+        throw new UnsupportedOperationException("Transactional incident relationship queries are not supported");
+    }
+
+    default ActionExecution getActionExecution(String id) {
+        throw new UnsupportedOperationException("Durable action continuations are not supported");
+    }
+
+    default void putActionExecution(ActionExecution execution, long expectedVersion) {
+        throw new UnsupportedOperationException("Durable action continuations are not supported");
+    }
+
+    /** Engine compensation: replace mutable values without backdating or bypassing schema constraints. */
+    default ObjectRecord restoreObjectProperties(String type, String id, Map<String, Object> properties, long expectedVersion) {
+        throw new UnsupportedOperationException("Compensation is not supported");
+    }
+
+    /** Engine compensation: append a new active assertion for the same previously terminated relationship. */
+    default LinkRecord restoreLink(String type, String id, long expectedVersion) {
+        throw new UnsupportedOperationException("Compensation is not supported");
+    }
+
     void appendAudit(AuditEntry audit);
 
     void enqueueOutbox(OutboxEntry event);

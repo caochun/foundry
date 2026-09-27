@@ -39,6 +39,9 @@ class FilteredDeletionManifestTest {
         assertEquals("c23c19f1b342f09ccb15d1ef970cac4793e4a8e17ef58a2039b75e64b578b28d",
                 ActionFingerprint.hash(new ActionManifest("Unlink", 1, false, List.of(),
                         List.of(new ActionManifest.DeleteLink("Related", "params.linkId")))));
+        // Captured from the prior six-field manifest implementation at 6e2e400.
+        assertEquals("2f66830a72c87aeef383be3174827f47ecfb422c4364eda975a972bf62d2dd1f",
+                ActionFingerprint.hash(new ActionManifest("Return", 1, false, List.of(), List.of(), ActionManifest.RollbackPolicy.ROLLBACK_ALL)));
         var one = new ActionManifest.DeleteLink("Related", new ActionManifest.LinkFilter("source", null, true), ActionManifest.LinkExpectation.ONE);
         var all = new ActionManifest.DeleteLink("Related", one.filter(), ActionManifest.LinkExpectation.ALL);
         assertNotEquals(ActionFingerprint.hash(one), ActionFingerprint.hash(all));

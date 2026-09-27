@@ -17,7 +17,7 @@ public final class ActionManifestParser {
             throw new ActionParseException("invalid Action YAML: " + exception.getMessage());
         }
         Map<String, Object> root = map(loaded, "Action manifest must be a mapping");
-        rejectUnknown(root, java.util.Set.of("action", "version", "reversible", "preconditions", "effects", "rollback"));
+        rejectUnknown(root, java.util.Set.of("action", "version", "reversible", "preconditions", "effects", "rollback", "sideEffects"));
         String action = string(root, "action");
         int version = integer(root, "version");
         boolean reversible = root.getOrDefault("reversible", Boolean.FALSE) instanceof Boolean value && value;
@@ -44,7 +44,7 @@ public final class ActionManifestParser {
             });
             effects.add(switch (type) {
                 case "updateObject" -> new ActionManifest.UpdateObject(string(value, "target"), stringMap(value.get("set")));
-                case "createObject" -> new ActionManifest.CreateObject(string(value, "objectType"), string(value, "target"), stringMap(value.get("properties")));
+                case "createObject" -> new ActionManifest.CreateObject(string(value, "objectType"), value.containsKey("target") ? string(value, "target") : null, stringMap(value.get("properties")));
                 case "createLink" -> new ActionManifest.CreateLink(string(value, "linkType"), string(value, "from"), string(value, "to"), stringMap(value.get("properties")));
                 case "deleteLink" -> deleteLink(value);
                 default -> throw new ActionParseException("unsupported effect type: " + type);
@@ -60,7 +60,30 @@ public final class ActionManifestParser {
                 throw new ActionParseException("Unknown side-effect failure policy");
             }
         }
-        return new ActionManifest(action, version, reversible, preconditions, effects, policy);
+        var sideEffects = new ArrayList<ActionManifest.SideEffect>();
+        for (Object item : list(root.get("sideEffects"))) {
+            var effect = map(item, "side-effect must be a mapping");
+            rejectUnknown(effect, java.util.Set.of("name", "type", "config", "retries", "retryDelay"));
+            int retries = effect.containsKey("retries") ? integer(effect, "retries") : 3;
+            String type = string(effect, "type");
+            var config = map(effect.get("config"), "side-effect config must be a mapping");
+            rejectUnknown(config, switch (type) {
+                case "event" -> java.util.Set.of("type", "source", "subject", "data");
+                case "webhook" -> java.util.Set.of("url", "method", "body", "headers", "timeoutMs");
+                default -> throw new ActionParseException("Unsupported side-effect type: " + type);
+            });
+            string(config, type.equals("event") ? "type" : "url");
+            if (type.equals("event") && config.get("data") != null && !(config.get("data") instanceof Map<?, ?>)) {
+                throw new ActionParseException("Event data must be an object");
+            }
+            try {
+                sideEffects.add(new ActionManifest.SideEffect(string(effect, "name"), type, config, retries,
+                        effect.containsKey("retryDelay") ? java.time.Duration.parse(string(effect, "retryDelay")) : java.time.Duration.ofMillis(200)));
+            } catch (IllegalArgumentException invalid) {
+                throw new ActionParseException("Invalid side-effect declaration: " + invalid.getMessage());
+            }
+        }
+        return new ActionManifest(action, version, reversible, preconditions, effects, policy, sideEffects);
     }
 
     private static ActionManifest.DeleteLink deleteLink(Map<String, Object> value) {
@@ -117,8 +140,14 @@ public final class ActionManifestParser {
 
     private static int integer(Map<String, Object> map, String key) {
         Object value = map.get(key);
-        if (!(value instanceof Number number)) throw new ActionParseException("missing integer field: " + key);
-        return number.intValue();
+        if (!(value instanceof Integer || value instanceof Long || value instanceof java.math.BigInteger)) {
+            throw new ActionParseException("missing integer field: " + key);
+        }
+        try {
+            return new java.math.BigInteger(value.toString()).intValueExact();
+        } catch (ArithmeticException invalid) {
+            throw new ActionParseException("integer field out of range: " + key);
+        }
     }
 
     private static Map<String, String> stringMap(Object value) {

@@ -32,7 +32,7 @@ Transaction新增：
 
 ## 持久化与升级
 
-of_command_receipts以tenant_id＋receipt_key为主键，保存actor_id、action_name、request_hash与最小result_json。结果格式目前为1；改变结果或指纹编码必须评审兼容及迁移，不能覆盖已有回执或静默换算法。
+of_command_receipts以tenant_id＋receipt_key为主键，保存actor_id、action_name、request_hash与最小result_json。无副作用结果继续使用格式1；含副作用动作使用格式2指向同事务的ActionExecution，以其当前状态为结果。旧无副作用manifest摘要编码保留，见[ADR-0012](adr/0012-durable-action-side-effects.md)。改变结果或指纹编码必须评审兼容及迁移，不能覆盖已有回执或静默换算法。
 
 JDBC回执随数据库恢复；内存Provider重建后不保留状态，不能称为跨进程持久。回执不自动过期，以免旧请求重新执行；未来归档须保留去重依据。
 

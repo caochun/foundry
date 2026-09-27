@@ -36,7 +36,10 @@ class ActionParameterValidatorTest {
         org.junit.jupiter.api.Assertions.assertThrows(ActionParseException.class, () -> parser.parse("""
                 action: HiddenSideEffect
                 version: 1
-                sideEffects: []
+                sideEffects:
+                  - name: unsupported
+                    type: shell
+                    config: {command: unsupported}
                 effects: []
                 """));
         org.junit.jupiter.api.Assertions.assertThrows(ActionParseException.class, () -> parser.parse("""

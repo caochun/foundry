@@ -139,7 +139,16 @@ public interface DatabaseDialect {
                         timestamp, timestamp, timestamp, text,
                         timestamp, timestamp, timestamp, timestamp, timestamp, text,
                         timestamp, timestamp, timestamp, text,
-                        timestamp, text, timestamp, text, timestamp, text, timestamp);
+                        timestamp, text, timestamp, text, timestamp, text, timestamp) + """
+                CREATE TABLE IF NOT EXISTS of_action_executions (
+                  tenant_id VARCHAR(255) NOT NULL, execution_id VARCHAR(255) NOT NULL,
+                  actor_id VARCHAR(255) NOT NULL, action_name VARCHAR(255) NOT NULL,
+                  version BIGINT NOT NULL, status VARCHAR(64) NOT NULL, available_at %s,
+                  state_json %s NOT NULL, PRIMARY KEY (tenant_id, execution_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_of_action_executions_due
+                  ON of_action_executions (tenant_id, actor_id, available_at);
+                """.formatted(timestamp, text);
     }
 
     static DatabaseDialect h2() {

@@ -28,4 +28,6 @@ ActionValues从写入前参数快照解析普通参数、params路径、对象ID
 
 未修改的Library schema及ReturnBook YAML已纳入测试，memory/H2单连接池验证权限前置条件、状态更新、筛选终止借阅关系、历史和幂等重放。ReturnBook只有本地effect，所以允许保留其rollback.onSideEffectFailure声明而不执行不存在的副作用。
 
-ActionManifest保留三种失败策略枚举，但sideEffects仍明确拒绝。上游BorrowBook仍不能执行：事件副作用在业务提交后执行，ROLLBACK_ALL涉及补偿；不能用“事务outbox写入成功”冒充事件已执行、补偿已实现。下一阶段需接通持久副作用任务、分发/恢复、失败策略及补偿验证，完整Library借还与完整Action覆盖仍未完成。
+本ADR阶段ActionManifest保留三种失败策略枚举，但sideEffects当时仍明确拒绝。上游BorrowBook仍不能执行：事件副作用在业务提交后执行，ROLLBACK_ALL涉及补偿；不能用“事务outbox写入成功”冒充事件已执行、补偿已实现。下一阶段需接通持久副作用任务、分发/恢复、失败策略及补偿验证，完整Library借还与完整Action覆盖仍未完成。
+
+后续实现：副作用任务、处理器与补偿现已在[ADR-0012](0012-durable-action-side-effects.md)接通，上述阶段限制不代表当前全部状态。

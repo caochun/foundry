@@ -172,7 +172,22 @@ public final class ApplicationService {
             Object value = parameters.get(parameter.name());
             resolved.put(parameter.name(), resolve(context, parameter.type(), value));
         }
-        ActionAuthorizer policy = new ActionAuthorizer() {
+        return actions.withAuthorization(actionPolicy(principal)).execute(registered, definition, context,
+                new ActionActor(principal.id(), principal.roles()), Collections.unmodifiableMap(resolved), idempotencyKey, storage);
+    }
+
+    public ActionResult resume(RequestContext context, SecurityPrincipal principal, String actionName, String actionId) {
+        requireContext(context, principal);
+        var manifest = manifests.get(actionName);
+        var definition = definitions.get(actionName);
+        if (manifest == null || definition == null || !authorization.check(context, principal, definition.permission(),
+                new EntityKey("ActionType", definition.name()))) throw new SecurityException("Action continuation denied");
+        return actions.withAuthorization(actionPolicy(principal)).resume(manifest, definition, actionId, context,
+                new ActionActor(principal.id(), principal.roles()), storage);
+    }
+
+    private ActionAuthorizer actionPolicy(SecurityPrincipal principal) {
+        return new ActionAuthorizer() {
             @Override
             public boolean allowed(RequestContext ctx, ActionActor actor, ActionTypeDefinition type, Map<String, Object> values) {
                 return check(ctx, type, values, null);
@@ -206,8 +221,6 @@ public final class ApplicationService {
                         && permittedReferences(ctx, principal, type.permission(), values.values());
             }
         };
-        return actions.withAuthorization(policy).execute(registered, definition, context, new ActionActor(principal.id(), principal.roles()),
-                Collections.unmodifiableMap(resolved), idempotencyKey, storage);
     }
 
     private Object resolve(RequestContext context, String type, Object value) {

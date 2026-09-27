@@ -16,6 +16,11 @@
     <dependencies>
         <dependency>
             <groupId>org.openfoundry</groupId>
+            <artifactId>foundry-events</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.openfoundry</groupId>
             <artifactId>foundry-storage-jdbc</artifactId>
             <version>${project.version}</version>
             <scope>test</scope>

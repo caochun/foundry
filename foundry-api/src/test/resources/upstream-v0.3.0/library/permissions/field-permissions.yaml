@@ -1,0 +1,17 @@
+# Field-level redaction for the library pack.
+#
+# Marking a field @sensitive in ODL records intent; it does NOT redact on its
+# own. Redaction engages for an object type only when that type appears here.
+# Once it does, the rule inverts for stored fields: a field is hidden unless
+# alwaysVisible or granted to one of the caller's roles. Virtual @link fields
+# are resolved and authorized separately, so they do not belong in this file.
+- objectType: Member
+  alwaysVisible:
+    - id
+    - memberNumber
+    - name
+  fieldsByRelation:
+    librarian:
+      - email
+    admin:
+      - email

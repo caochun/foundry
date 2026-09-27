@@ -279,6 +279,34 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
     }
 
     @Override
+    public List<org.openfoundry.foundation.spi.ActionExecution> pendingActions(RequestContext context, Instant now, int limit) {
+        if (limit < 1 || limit > 10000) throw new IllegalArgumentException("Invalid continuation limit");
+        String sql = "SELECT * FROM of_action_executions WHERE tenant_id = ? AND actor_id = ? AND available_at <= ?"
+                + " ORDER BY available_at, execution_id" + dialect.paginationClause();
+        try (var connection = dataSource.getConnection(); var statement = connection.prepareStatement(sql)) {
+            statement.setString(1, context.tenantId());
+            statement.setString(2, context.actorId());
+            statement.setTimestamp(3, timestamp(now));
+            statement.setInt(4, limit);
+            statement.setInt(5, 0);
+            try (var rows = statement.executeQuery()) {
+                var result = new ArrayList<org.openfoundry.foundation.spi.ActionExecution>();
+                while (rows.next()) result.add(readActionExecution(rows));
+                return List.copyOf(result);
+            }
+        } catch (SQLException failure) {
+            throw sqlError("list action continuations", failure);
+        }
+    }
+
+    private org.openfoundry.foundation.spi.ActionExecution readActionExecution(ResultSet row) throws SQLException {
+        var available = row.getTimestamp("available_at");
+        return new org.openfoundry.foundation.spi.ActionExecution(row.getString("execution_id"), row.getString("actor_id"),
+                row.getString("action_name"), row.getLong("version"), row.getString("status"),
+                available == null ? null : available.toInstant(), jsonMap(row.getString("state_json")));
+    }
+
+    @Override
     public Transaction beginTransaction(RequestContext context) {
         initializeWriteGuard(context);
         try {
@@ -559,13 +587,25 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
         @Override
         public ObjectRecord updateObject(String type, String id, Map<String, Object> properties, long expectedVersion, Instant effectiveAt) {
+            return writeObjectProperties(type, id, properties, expectedVersion, effectiveAt, false);
+        }
+
+        @Override
+        public ObjectRecord restoreObjectProperties(String type, String id, Map<String, Object> properties, long expectedVersion) {
+            return writeObjectProperties(type, id, properties, expectedVersion, null, true);
+        }
+
+        private ObjectRecord writeObjectProperties(String type, String id, Map<String, Object> properties,
+                                                    long expectedVersion, Instant effectiveAt, boolean replace) {
             assertOpen();
             lockWrites();
             ObjectRecord existing = requireObject(findObject(type, id), type, id);
             assertVersion(existing.version(), expectedVersion);
             if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
-            Map<String, Object> merged = propertyValidator.validate(schema, objectProperties(type), objectConstraints(type), id, properties, existing.properties(), context, now);
+            Map<String, Object> merged = replace
+                    ? propertyValidator.restore(schema, objectProperties(type), objectConstraints(type), id, properties, existing.properties(), context, now)
+                    : propertyValidator.validate(schema, objectProperties(type), objectConstraints(type), id, properties, existing.properties(), context, now);
             uniqueProperties.check(schema, "object", type, objectProperties(type), id, merged, () -> currentProperties(false, type));
             Instant effective = effectiveTime(false, type, id, effectiveAt, now);
             long version = existing.version() + 1;
@@ -702,6 +742,43 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         }
 
         @Override
+        public LinkRecord restoreLink(String type, String id, long expectedVersion) {
+            acquireWrite();
+            var definition = requireLinkType(type);
+            var existing = requireLink(findLink(type, id), type, id);
+            assertVersion(existing.version(), expectedVersion);
+            if (!existing.isDeleted()) throw new IllegalStateException("Relationship is not terminated");
+            requireActiveObject(existing.from());
+            requireActiveObject(existing.to());
+            enforceCardinality(definition, existing.from(), existing.to());
+            Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = effectiveTime(true, type, id, null, now);
+            var properties = propertyValidator.validate(schema, definition.properties(), definition.constraints(), id,
+                    Map.of(), existing.properties(), context, now);
+            uniqueProperties.check(schema, "link", type, definition.properties(), id, properties, () -> currentProperties(true, type));
+            String sql = "UPDATE of_links SET version = ?, updated_at = ?, deleted_at = NULL, valid_from = ?, valid_to = NULL,"
+                    + " last_transaction_id = ?, properties_json = ? WHERE tenant_id = ? AND link_type = ? AND link_id = ? AND version = ?";
+            try (var statement = connection.prepareStatement(sql)) {
+                statement.setLong(1, existing.version() + 1);
+                statement.setTimestamp(2, timestamp(now));
+                statement.setTimestamp(3, timestamp(effective));
+                statement.setString(4, transactionId);
+                statement.setString(5, json(properties));
+                statement.setString(6, context.tenantId());
+                statement.setString(7, type);
+                statement.setString(8, id);
+                statement.setLong(9, expectedVersion);
+                if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during relationship restore");
+                insertLinkHistory(type, id, existing.from(), existing.to(), existing.version() + 1, EntityOperation.RESTORED,
+                        effective, null, now, properties);
+                uniqueProperties.applied(schema, "link", type, definition.properties(), id, null, properties);
+                return findLink(type, id);
+            } catch (SQLException failure) {
+                throw sqlError("restore relationship", failure);
+            }
+        }
+
+        @Override
         public void acquireWrite() {
             assertOpen();
             lockWrites();
@@ -777,6 +854,72 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setString(6, json(receipt.result()));
                 statement.executeUpdate();
             } catch (SQLException failure) { throw sqlError("write command receipt", failure); }
+        }
+
+        @Override
+        public List<LinkRecord> connectedLinks(EntityKey endpoint) {
+            assertOpen();
+            String sql = linkSelect() + " WHERE tenant_id = ? AND deleted_at IS NULL"
+                    + " AND ((from_type = ? AND from_id = ?) OR (to_type = ? AND to_id = ?)) ORDER BY link_type, link_id";
+            try (var statement = connection.prepareStatement(sql)) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, endpoint.type());
+                statement.setString(3, endpoint.id());
+                statement.setString(4, endpoint.type());
+                statement.setString(5, endpoint.id());
+                try (var rows = statement.executeQuery()) {
+                    var result = new ArrayList<LinkRecord>();
+                    while (rows.next()) result.add(readLink(rows));
+                    return List.copyOf(result);
+                }
+            } catch (SQLException failure) {
+                throw sqlError("read incident relationships", failure);
+            }
+        }
+
+        @Override
+        public org.openfoundry.foundation.spi.ActionExecution getActionExecution(String id) {
+            assertOpen();
+            try (var statement = connection.prepareStatement("SELECT * FROM of_action_executions WHERE tenant_id = ? AND execution_id = ?")) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, id);
+                try (var row = statement.executeQuery()) {
+                    if (!row.next()) return null;
+                    var execution = readActionExecution(row);
+                    if (!Objects.equals(execution.actorId(), context.actorId())) throw new SecurityException("Action execution belongs to another actor");
+                    return execution;
+                }
+            } catch (SQLException failure) {
+                throw sqlError("read action continuation", failure);
+            }
+        }
+
+        @Override
+        public void putActionExecution(org.openfoundry.foundation.spi.ActionExecution execution, long expectedVersion) {
+            acquireWrite();
+            if (!Objects.equals(execution.actorId(), context.actorId()) || execution.version() != expectedVersion + 1) {
+                throw new IllegalArgumentException("Invalid execution identity or version");
+            }
+            var previous = getActionExecution(execution.id());
+            if ((previous == null ? 0 : previous.version()) != expectedVersion) throw new IllegalStateException("Action execution version conflict");
+            if (previous != null && !previous.action().equals(execution.action())) throw new IllegalArgumentException("Action identity cannot change");
+            String sql = previous == null
+                    ? "INSERT INTO of_action_executions (actor_id, action_name, version, status, available_at, state_json, tenant_id, execution_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                    : "UPDATE of_action_executions SET actor_id = ?, action_name = ?, version = ?, status = ?, available_at = ?, state_json = ? WHERE tenant_id = ? AND execution_id = ? AND version = ?";
+            try (var statement = connection.prepareStatement(sql)) {
+                statement.setString(1, execution.actorId());
+                statement.setString(2, execution.action());
+                statement.setLong(3, execution.version());
+                statement.setString(4, execution.status());
+                statement.setTimestamp(5, execution.availableAt() == null ? null : timestamp(execution.availableAt()));
+                statement.setString(6, json(execution.state()));
+                statement.setString(7, context.tenantId());
+                statement.setString(8, execution.id());
+                if (previous != null) statement.setLong(9, expectedVersion);
+                if (statement.executeUpdate() != 1) throw new IllegalStateException("Action execution version conflict");
+            } catch (SQLException failure) {
+                throw sqlError("write action continuation", failure);
+            }
         }
 
         @Override
@@ -916,6 +1059,9 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         }
 
         private void enforceCardinality(LinkTypeDefinition definition, EntityKey from, EntityKey to) {
+            if (!definition.fromType().equals(from.type()) || !definition.toType().equals(to.type())) {
+                throw new IllegalArgumentException("Link endpoint types do not match schema");
+            }
             String predicate = switch (definition.cardinality()) {
                 case ONE_TO_ONE -> "(from_type = ? AND from_id = ?) OR (to_type = ? AND to_id = ?)";
                 case ONE_TO_MANY -> "to_type = ? AND to_id = ?";

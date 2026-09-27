@@ -191,6 +191,19 @@ public final class InMemoryStorageProvider implements StorageProvider {
     }
 
     @Override
+    public List<org.openfoundry.foundation.spi.ActionExecution> pendingActions(RequestContext context, Instant now, int limit) {
+        if (limit < 1 || limit > 10000) throw new IllegalArgumentException("Invalid continuation limit");
+        synchronized (monitor) {
+            return state.executions.entrySet().stream()
+                    .filter(entry -> entry.getKey().equals(objectKey(context, "__action_execution", entry.getValue().id())))
+                    .map(Map.Entry::getValue)
+                    .filter(run -> Objects.equals(run.actorId(), context.actorId()) && run.availableAt() != null && !run.availableAt().isAfter(now))
+                    .sorted(Comparator.comparing(org.openfoundry.foundation.spi.ActionExecution::availableAt)
+                            .thenComparing(org.openfoundry.foundation.spi.ActionExecution::id)).limit(limit).toList();
+        }
+    }
+
+    @Override
     public Transaction beginTransaction(RequestContext context) {
         Objects.requireNonNull(context, "context must not be null");
         synchronized (monitor) {
@@ -323,6 +336,16 @@ public final class InMemoryStorageProvider implements StorageProvider {
         @Override
         public ObjectRecord updateObject(String type, String id, Map<String, Object> properties,
                                          long expectedVersion, Instant effectiveAt) {
+            return writeObjectProperties(type, id, properties, expectedVersion, effectiveAt, false);
+        }
+
+        @Override
+        public ObjectRecord restoreObjectProperties(String type, String id, Map<String, Object> properties, long expectedVersion) {
+            return writeObjectProperties(type, id, properties, expectedVersion, null, true);
+        }
+
+        private ObjectRecord writeObjectProperties(String type, String id, Map<String, Object> properties,
+                                                    long expectedVersion, Instant effectiveAt, boolean replace) {
             assertOpen();
             requireObjectType(type);
             String key = objectKey(context, type, id);
@@ -330,7 +353,9 @@ public final class InMemoryStorageProvider implements StorageProvider {
             assertVersion(existing.version(), expectedVersion);
             if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
-            Map<String, Object> merged = propertyValidator.validate(schema, objectProperties(type), objectConstraints(type), id, properties, existing.properties(), context, now);
+            Map<String, Object> merged = replace
+                    ? propertyValidator.restore(schema, objectProperties(type), objectConstraints(type), id, properties, existing.properties(), context, now)
+                    : propertyValidator.validate(schema, objectProperties(type), objectConstraints(type), id, properties, existing.properties(), context, now);
             uniqueProperties.check(schema, "object", type, objectProperties(type), id, merged, () -> currentProperties(false, type));
             Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             ObjectRecord updated = new ObjectRecord(context.tenantId(), type, id,
@@ -456,6 +481,30 @@ public final class InMemoryStorageProvider implements StorageProvider {
         }
 
         @Override
+        public LinkRecord restoreLink(String type, String id, long expectedVersion) {
+            assertOpen();
+            var definition = requireLinkType(type);
+            var key = linkKey(context, type, id);
+            var existing = requireLink(working.links.get(key), type, id);
+            assertVersion(existing.version(), expectedVersion);
+            if (!existing.isDeleted()) throw new IllegalStateException("Relationship is not terminated");
+            requireActiveObject(existing.from());
+            requireActiveObject(existing.to());
+            enforceCardinality(definition, existing.from(), existing.to());
+            Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            Instant effective = TemporalHistory.effectiveAt(null, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
+            var properties = propertyValidator.validate(schema, definition.properties(), definition.constraints(), id,
+                    Map.of(), existing.properties(), context, now);
+            uniqueProperties.check(schema, "link", type, definition.properties(), id, properties, () -> currentProperties(true, type));
+            var restored = new LinkRecord(context.tenantId(), type, id, existing.from(), existing.to(), existing.version() + 1,
+                    existing.createdAt(), now, null, effective, null, transactionId, null, properties);
+            working.links.put(key, restored);
+            appendHistory(new EntityKey(type, id), restored.version(), EntityOperation.RESTORED, effective, null, now, linkState(restored));
+            uniqueProperties.applied(schema, "link", type, definition.properties(), id, null, properties);
+            return restored;
+        }
+
+        @Override
         public void acquireWrite() {
             assertOpen();
         }
@@ -498,6 +547,35 @@ public final class InMemoryStorageProvider implements StorageProvider {
             if (!receipt.actorId().equals(context.actorId())) throw new SecurityException("Command receipt actor mismatch");
             String key = objectKey(context, "__command_receipt", receipt.key());
             if (working.receipts.putIfAbsent(key, receipt) != null) throw new IllegalStateException("Command receipt already exists");
+        }
+
+        @Override
+        public List<LinkRecord> connectedLinks(EntityKey endpoint) {
+            assertOpen();
+            return working.links.values().stream()
+                    .filter(link -> link.tenantId().equals(context.tenantId()) && !link.isDeleted())
+                    .filter(link -> link.from().equals(endpoint) || link.to().equals(endpoint))
+                    .sorted(Comparator.comparing(LinkRecord::type).thenComparing(LinkRecord::id)).toList();
+        }
+
+        @Override
+        public org.openfoundry.foundation.spi.ActionExecution getActionExecution(String id) {
+            assertOpen();
+            var execution = working.executions.get(objectKey(context, "__action_execution", id));
+            if (execution != null && !Objects.equals(execution.actorId(), context.actorId())) throw new SecurityException("Action execution belongs to another actor");
+            return execution;
+        }
+
+        @Override
+        public void putActionExecution(org.openfoundry.foundation.spi.ActionExecution execution, long expectedVersion) {
+            assertOpen();
+            if (!Objects.equals(execution.actorId(), context.actorId()) || execution.version() != expectedVersion + 1) {
+                throw new IllegalArgumentException("Invalid execution identity or version");
+            }
+            var previous = getActionExecution(execution.id());
+            if ((previous == null ? 0 : previous.version()) != expectedVersion) throw new IllegalStateException("Action execution version conflict");
+            if (previous != null && !previous.action().equals(execution.action())) throw new IllegalArgumentException("Action identity cannot change");
+            working.executions.put(objectKey(context, "__action_execution", execution.id()), execution);
         }
 
         @Override
@@ -555,6 +633,9 @@ public final class InMemoryStorageProvider implements StorageProvider {
         }
 
         private void enforceCardinality(LinkTypeDefinition definition, EntityKey from, EntityKey to) {
+            if (!definition.fromType().equals(from.type()) || !definition.toType().equals(to.type())) {
+                throw new IllegalArgumentException("Link endpoint types do not match schema");
+            }
             List<LinkRecord> active = working.links.values().stream()
                     .filter(link -> link.tenantId().equals(context.tenantId()))
                     .filter(link -> link.type().equals(definition.name()))
@@ -663,27 +744,30 @@ public final class InMemoryStorageProvider implements StorageProvider {
         private final List<AuditEntry> audits;
         private final List<OutboxEntry> outbox;
         private final Map<String, org.openfoundry.foundation.spi.CommandReceipt> receipts;
+        private final Map<String, org.openfoundry.foundation.spi.ActionExecution> executions;
 
         private State() {
-            this(new HashMap<>(), new HashMap<>(), new HashMap<>(), new ArrayList<>(), new ArrayList<>(), new HashMap<>());
+            this(new HashMap<>(), new HashMap<>(), new HashMap<>(), new ArrayList<>(), new ArrayList<>(), new HashMap<>(), new HashMap<>());
         }
 
         private State(Map<String, ObjectRecord> objects, Map<String, LinkRecord> links,
                       Map<String, List<HistorySnapshot>> history, List<AuditEntry> audits,
-                      List<OutboxEntry> outbox, Map<String, org.openfoundry.foundation.spi.CommandReceipt> receipts) {
+                      List<OutboxEntry> outbox, Map<String, org.openfoundry.foundation.spi.CommandReceipt> receipts,
+                      Map<String, org.openfoundry.foundation.spi.ActionExecution> executions) {
             this.objects = objects;
             this.links = links;
             this.history = history;
             this.audits = audits;
             this.outbox = outbox;
             this.receipts = receipts;
+            this.executions = executions;
         }
 
         private State copy() {
             Map<String, List<HistorySnapshot>> copiedHistory = new HashMap<>();
             history.forEach((key, value) -> copiedHistory.put(key, new ArrayList<>(value)));
             return new State(new HashMap<>(objects), new HashMap<>(links), copiedHistory,
-                    new ArrayList<>(audits), new ArrayList<>(outbox), new HashMap<>(receipts));
+                    new ArrayList<>(audits), new ArrayList<>(outbox), new HashMap<>(receipts), new HashMap<>(executions));
         }
     }
 }

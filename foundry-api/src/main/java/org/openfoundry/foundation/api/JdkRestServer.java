@@ -68,12 +68,19 @@ public final class JdkRestServer implements AutoCloseable {
             response = router.get(context.request(), context.principal(), exchange.getRequestURI().getPath(), QueryOptions.defaults());
         } else if ("POST".equalsIgnoreCase(exchange.getRequestMethod())
                 && exchange.getRequestURI().getPath().startsWith("/api/v1/actions/")) {
-            String actionName = exchange.getRequestURI().getPath().substring("/api/v1/actions/".length());
-            ActionManifest manifest = manifests.get(actionName);
+            String[] route = exchange.getRequestURI().getPath().substring("/api/v1/actions/".length()).split("/");
+            if (route.length == 0) { write(exchange, ApiResponse.notFound()); return; }
+            ActionManifest manifest = manifests.get(route[0]);
             if (manifest == null) { write(exchange, ApiResponse.notFound()); return; }
-            Map<String, Object> input = mapper.readValue(exchange.getRequestBody(), new com.fasterxml.jackson.core.type.TypeReference<>() {});
-            String key = exchange.getRequestHeaders().getFirst("Idempotency-Key");
-            response = router.execute(context.request(), context.principal(), actionName, manifest, input, key);
+            if (route.length == 4 && route[1].equals("executions") && route[3].equals("resume")) {
+                response = router.resume(context.request(), context.principal(), route[0], route[2]);
+            } else if (route.length == 1) {
+                Map<String, Object> input = mapper.readValue(exchange.getRequestBody(), new com.fasterxml.jackson.core.type.TypeReference<>() {});
+                String key = exchange.getRequestHeaders().getFirst("Idempotency-Key");
+                response = router.execute(context.request(), context.principal(), route[0], manifest, input, key);
+            } else {
+                response = ApiResponse.notFound();
+            }
         } else {
             response = ApiResponse.badRequest("unsupported HTTP method");
         }

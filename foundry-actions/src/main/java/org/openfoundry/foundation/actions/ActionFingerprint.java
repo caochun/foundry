@@ -24,10 +24,17 @@ final class ActionFingerprint {
     private static String encode(Object value) {
         if (value == null) return "null;";
         if (value instanceof ObjectRecord object) return encode(List.of("object", object.tenantId(), object.type(), object.id()));
-        if (value instanceof ActionManifest manifest && manifest.onSideEffectFailure() == ActionManifest.RollbackPolicy.LOG_AND_CONTINUE) {
-            return encode(value.getClass().getName()) + encode(Map.of("action", manifest.action(), "version", manifest.version(),
-                    "reversible", manifest.reversible(), "preconditions", manifest.preconditions(), "effects", manifest.effects()));
+        if (value instanceof ActionManifest manifest && manifest.sideEffects().isEmpty()) {
+            var fields = new java.util.LinkedHashMap<String, Object>();
+            fields.put("action", manifest.action());
+            fields.put("version", manifest.version());
+            fields.put("reversible", manifest.reversible());
+            fields.put("preconditions", manifest.preconditions());
+            fields.put("effects", manifest.effects());
+            if (manifest.onSideEffectFailure() != ActionManifest.RollbackPolicy.LOG_AND_CONTINUE) fields.put("onSideEffectFailure", manifest.onSideEffectFailure());
+            return encode(value.getClass().getName()) + encode(fields);
         }
+        if (value instanceof java.time.Duration duration) return encode(List.of("duration", duration.toString()));
         // Keep existing durable receipts valid for the legacy direct-ID DeleteLink declaration.
         if (value instanceof ActionManifest.DeleteLink deletion && deletion.linkId() != null) {
             return encode(value.getClass().getName()) + encode(Map.of("linkType", deletion.linkType(), "linkId", deletion.linkId()));
