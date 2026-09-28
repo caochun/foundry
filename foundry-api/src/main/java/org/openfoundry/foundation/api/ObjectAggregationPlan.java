@@ -15,6 +15,7 @@ import java.util.Set;
 
 /** Evaluates only server-authorized rows; every referenced property is bound before execution. */
 final class ObjectAggregationPlan {
+    private final org.openfoundry.foundation.spi.schema.OntologySchema schema;
     private final AggregateQuery query;
     private final Map<String, PropertyDefinition> properties = new LinkedHashMap<>();
     private final Set<String> visible;
@@ -22,7 +23,8 @@ final class ObjectAggregationPlan {
     private final List<Measure> measures;
     private final Comparator<AggregateResult.Group> comparator;
 
-    ObjectAggregationPlan(List<PropertyDefinition> definitions, Set<String> visible, AggregateQuery query) {
+    ObjectAggregationPlan(org.openfoundry.foundation.spi.schema.OntologySchema schema, List<PropertyDefinition> definitions, Set<String> visible, AggregateQuery query) {
+        this.schema = schema;
         definitions.forEach(field -> properties.put(field.name(), field));
         this.visible = visible;
         this.query = query;
@@ -82,11 +84,12 @@ final class ObjectAggregationPlan {
         return field.primary() ? object.id() : object.properties().get(field.name());
     }
 
-    private static int compare(PropertyDefinition field, Object left, Object right, AggregateQuery.Direction direction) {
+    private int compare(PropertyDefinition field, Object left, Object right, AggregateQuery.Direction direction) {
         if (left == null || right == null) return left == right ? 0 : left == null ? 1 : -1;
         int comparison;
         if (field == null) comparison = new BigDecimal(left.toString()).compareTo(new BigDecimal(right.toString()));
-        else if (field.type().startsWith("[") || Set.of("JSON", "GeoPoint").contains(field.type())) {
+        else if (field.type().startsWith("[") || Set.of("JSON", "GeoPoint").contains(field.type())
+                || schema.isScalar(field.type()) && !PropertyValues.SCALARS.contains(field.type())) {
             comparison = PropertyValues.canonical(left).compareTo(PropertyValues.canonical(right));
         } else comparison = ObjectQueryPlan.compare(field.type(), left, right);
         return direction == AggregateQuery.Direction.DESC ? -Integer.signum(comparison) : comparison;

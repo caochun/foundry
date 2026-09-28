@@ -66,8 +66,8 @@ public final class OdlParser {
                 if (definition instanceof graphql.language.TypeDefinition<?> type) {
                     var previous = names.putIfAbsent(type.getName(), type);
                     if (previous != null) {
-                        if (type instanceof graphql.language.ScalarTypeDefinition && previous instanceof graphql.language.ScalarTypeDefinition
-                                && org.openfoundry.foundation.spi.schema.PropertyValues.SCALARS.contains(type.getName())
+                        if (type instanceof graphql.language.ScalarTypeDefinition scalar && previous instanceof graphql.language.ScalarTypeDefinition oldScalar
+                                && Objects.equals(scalarDescription(oldScalar), scalarDescription(scalar))
                                 && graphql.language.AstPrinter.printAstCompact(previous).equals(graphql.language.AstPrinter.printAstCompact(type))) continue;
                         throw new SchemaValidationException(List.of("conflicting composed type: " + type.getName()));
                     }
@@ -131,7 +131,7 @@ public final class OdlParser {
                 links.add(parseLink(object, interfaces));
             } else if (hasDirective(object, "actionType")) {
                 actions.add(parseAction(object));
-            } else if (hasDirective(object, "objectType")) {
+            } else {
                 objects.add(parseObject(object, interfaces));
             }
         }
@@ -143,7 +143,24 @@ public final class OdlParser {
                 if (enums.put(enumeration.getName(), values) != null) throw new SchemaValidationException(List.of("duplicate enum: " + enumeration.getName()));
             }
         }
-        return new OntologySchema(namespace.name(), namespace.version(), objects, links, actions, enums, List.copyOf(interfaces.values()));
+        var scalars = new ArrayList<org.openfoundry.foundation.spi.schema.ScalarDefinition>();
+        var scalarNames = new java.util.HashSet<String>();
+        for (Definition<?> definition : document.getDefinitions()) {
+            if (definition instanceof graphql.language.ScalarTypeDefinition scalar) {
+                if (!scalarNames.add(scalar.getName())) throw new SchemaValidationException(List.of("duplicate scalar: " + scalar.getName()));
+                if (!scalar.getDirectives().isEmpty()) throw new SchemaValidationException(List.of("unsupported scalar directive: " + scalar.getName()));
+                try {
+                    scalars.add(new org.openfoundry.foundation.spi.schema.ScalarDefinition(scalar.getName(), scalarDescription(scalar)));
+                } catch (IllegalArgumentException invalid) {
+                    throw new SchemaValidationException(List.of(invalid.getMessage()));
+                }
+            }
+        }
+        return new OntologySchema(namespace.name(), namespace.version(), objects, links, actions, enums, List.copyOf(interfaces.values()), scalars);
+    }
+
+    private static String scalarDescription(graphql.language.ScalarTypeDefinition scalar) {
+        return scalar.getDescription() == null ? null : scalar.getDescription().getContent();
     }
 
     private static org.openfoundry.foundation.spi.schema.ObjectTypeDefinition parseObject(
@@ -345,10 +362,16 @@ public final class OdlParser {
         if (value instanceof graphql.language.BooleanValue bool) return bool.isValue();
         if (value instanceof graphql.language.NullValue) return null;
         if (value instanceof graphql.language.IntValue number) {
-            try { return number.getValue().intValueExact(); }
-            catch (ArithmeticException overflow) { throw new SchemaValidationException(List.of("integer default exceeds Int range")); }
+            var exact = number.getValue();
+            if (exact.bitLength() < 32) return exact.intValue();
+            if (exact.bitLength() < 64) return exact.longValue();
+            return exact;
         }
-        if (value instanceof graphql.language.FloatValue number) return number.getValue().doubleValue();
+        if (value instanceof graphql.language.FloatValue number) {
+            var exact = number.getValue();
+            double approximate = exact.doubleValue();
+            return Double.isFinite(approximate) && java.math.BigDecimal.valueOf(approximate).compareTo(exact) == 0 ? approximate : exact;
+        }
         if (value instanceof graphql.language.ArrayValue list) return list.getValues().stream().map(OdlParser::literal).toList();
         if (value instanceof graphql.language.ObjectValue object) {
             var fields = new LinkedHashMap<String, Object>();

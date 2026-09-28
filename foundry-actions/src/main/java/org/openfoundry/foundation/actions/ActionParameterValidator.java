@@ -29,7 +29,7 @@ public final class ActionParameterValidator {
         for (var parameter : definition.parameters()) {
             if (Set.of("actor", "params", "now").contains(parameter.name())) errors.add("reserved Action parameter: " + parameter.name());
             String base = parameter.baseType();
-            if (objects != null && !PropertyValues.SCALARS.contains(base) && !schema.enums().containsKey(base) && !objects.contains(base)) {
+            if (objects != null && !this.schema.isScalar(base) && !schema.enums().containsKey(base) && !objects.contains(base)) {
                 errors.add("unknown Action parameter type: " + parameter.name());
                 continue;
             }
@@ -50,7 +50,7 @@ public final class ActionParameterValidator {
             String element = type.substring(1, type.length() - 1);
             return value instanceof List<?> list && list.stream().allMatch(item -> matches(element, item, name));
         }
-        if (PropertyValues.SCALARS.contains(type) || schema.enums().containsKey(type)) {
+        if (schema.isScalar(type) || schema.enums().containsKey(type)) {
             try {
                 PropertyValues.immutableValue(value); // Public parameter values must have a JSON wire representation.
                 PropertyValues.normalize(schema, type, value, name);

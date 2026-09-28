@@ -22,6 +22,7 @@ final class GraphqlActionTypes {
         schema.interfaces().forEach(type -> names.add(type.name()));
         names.addAll(schema.enums().keySet());
         for (String scalar : PropertyValues.SCALARS) if (names.contains(scalar)) throw new IllegalArgumentException("Reserved GraphQL scalar name: " + scalar);
+        schema.scalars().stream().filter(scalar -> !PropertyValues.SCALARS.contains(scalar.name())).forEach(scalar -> reserve(names, scalar.name()));
         for (String name : List.of("Query", "Mutation")) if (names.contains(name)) throw new IllegalArgumentException("Reserved GraphQL type name: " + name);
         for (String name : GraphqlQueryTypes.names(schema)) reserve(names, name);
         if (actions.isEmpty()) return;
@@ -64,6 +65,7 @@ final class GraphqlActionTypes {
         if (schema.objectTypes().stream().anyMatch(object -> object.name().equals(type))) return Scalars.GraphQLID;
         if (enums.containsKey(type)) return enums.get(type);
         if (GraphqlValueScalars.TYPES.containsKey(type)) return GraphqlValueScalars.TYPES.get(type);
+        if (!PropertyValues.SCALARS.contains(type) && schema.isScalar(type)) return GraphQLTypeReference.typeRef(type);
         return switch (type) {
             case "ID" -> Scalars.GraphQLID;
             case "String" -> Scalars.GraphQLString;
@@ -78,7 +80,7 @@ final class GraphqlActionTypes {
         if (type.endsWith("!")) return inputTypeName(type.substring(0, type.length() - 1), schema) + "!";
         if (type.startsWith("[") && type.endsWith("]")) return "[" + inputTypeName(type.substring(1, type.length() - 1), schema) + "]";
         if (schema.objectTypes().stream().anyMatch(object -> object.name().equals(type))) return "ID";
-        if (PropertyValues.SCALARS.contains(type) || schema.enums().containsKey(type)) return type;
+        if (schema.isScalar(type) || schema.enums().containsKey(type)) return type;
         throw new IllegalArgumentException("Unsupported Action input type: " + type);
     }
 

@@ -21,7 +21,7 @@ final class JdbcSchemaActivation {
     private final DatabaseDialect dialect;
     private final Clock clock;
     private final JdbcSchemaRegistry registry;
-    private final ObjectMapper mapper = new ObjectMapper();
+    private final ObjectMapper mapper = new ObjectMapper().registerModule(JsonNumbers.module());
     private final PropertyValidator validator = new PropertyValidator();
     private boolean initialized;
 

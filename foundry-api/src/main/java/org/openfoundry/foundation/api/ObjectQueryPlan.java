@@ -32,6 +32,7 @@ final class ObjectQueryPlan {
 
     static List<String> operators(String type, OntologySchema schema) {
         if (type.startsWith("[") || Set.of("JSON", "GeoPoint").contains(type)) return List.of();
+        if (schema.isScalar(type) && !PropertyValues.SCALARS.contains(type)) return List.of("eq", "ne", "in", "exists");
         if (type.equals("Boolean")) return List.of("eq", "ne", "exists");
         if (type.equals("ID") || schema.enums().containsKey(type)) return List.of("eq", "ne", "in", "exists");
         if (Set.of("Int", "Float", "Date", "DateTime", "Duration").contains(type)) {
@@ -41,7 +42,8 @@ final class ObjectQueryPlan {
     }
 
     static boolean orderable(String type, OntologySchema schema) {
-        return !type.equals("Boolean") && !operators(type, schema).isEmpty();
+        return !type.equals("Boolean") && !operators(type, schema).isEmpty()
+                && (PropertyValues.SCALARS.contains(type) || schema.enums().containsKey(type));
     }
 
     Predicate<ObjectRecord> predicate(Map<String, Object> filter) {
@@ -142,7 +144,10 @@ final class ObjectQueryPlan {
         return field.primary() ? object.id() : object.properties().get(field.name());
     }
 
-    private static boolean equal(String type, Object left, Object right) {
+    private boolean equal(String type, Object left, Object right) {
+        if (schema.isScalar(type) && !PropertyValues.SCALARS.contains(type)) {
+            return PropertyValues.canonical(left).equals(PropertyValues.canonical(right));
+        }
         return left == null || right == null ? left == right : compare(type, left, right) == 0;
     }
 

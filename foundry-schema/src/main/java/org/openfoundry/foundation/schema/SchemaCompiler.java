@@ -75,7 +75,7 @@ public final class SchemaCompiler {
             for (ActionParameter parameter : action.parameters()) {
                 if (Set.of("actor", "params", "now").contains(parameter.name())) issues.add("reserved Action parameter: " + parameter.name());
                 String parameterType = parameter.baseType();
-                if (!org.openfoundry.foundation.spi.schema.PropertyValues.SCALARS.contains(parameterType)
+                if (!schema.isScalar(parameterType)
                         && !schema.enums().containsKey(parameterType) && !objectNames.contains(parameterType)) {
                     issues.add("unsupported Action parameter type: " + action.name() + "." + parameter.name() + ": " + parameter.type());
                 }
@@ -96,7 +96,7 @@ public final class SchemaCompiler {
                 schema.linkTypes().stream().flatMap(type -> type.properties().stream())).toList();
         for (var property : fields) {
             String base = property.type().replace("[", "").replace("]", "").replace("!", "");
-            if (!org.openfoundry.foundation.spi.schema.PropertyValues.SCALARS.contains(base) && !schema.enums().containsKey(base)) {
+            if (!schema.isScalar(base) && !schema.enums().containsKey(base)) {
                 issues.add("unsupported property type: " + property.name() + ": " + property.type());
             }
             if (property.primary() && (!property.type().equals("ID") || !property.required())) issues.add("primary property must be ID!: " + property.name());
@@ -134,6 +134,8 @@ public final class SchemaCompiler {
     private static String canonical(OntologySchema schema) {
         StringBuilder result = new StringBuilder()
                 .append(schema.namespace()).append('|').append(schema.version());
+        schema.scalars().stream().sorted(java.util.Comparator.comparing(org.openfoundry.foundation.spi.schema.ScalarDefinition::name))
+                .forEach(type -> result.append("|S:").append(org.openfoundry.foundation.spi.schema.PropertyValues.canonical(java.util.Arrays.asList(type.name(), type.description()))));
         schema.interfaces().stream().sorted(java.util.Comparator.comparing(org.openfoundry.foundation.spi.schema.InterfaceDefinition::name))
                 .forEach(type -> result.append("|I:").append(type.name()).append(type.interfaces()).append(type.constraints()).append(properties(type.properties())).append(linkFields(type.linkFields())).append(computedFields(type.computedFields())));
         schema.enums().entrySet().stream().sorted(Map.Entry.comparingByKey())

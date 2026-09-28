@@ -20,7 +20,8 @@ public final class SchemaFingerprint {
                 schema.objectTypes().stream().sorted(Comparator.comparing(ObjectTypeDefinition::name)).toList(),
                 schema.linkTypes().stream().sorted(Comparator.comparing(LinkTypeDefinition::name)).toList(),
                 schema.actionTypes().stream().sorted(Comparator.comparing(ActionTypeDefinition::name)).toList(), schema.enums(),
-                schema.interfaces().stream().sorted(Comparator.comparing(InterfaceDefinition::name)).toList());
+                schema.interfaces().stream().sorted(Comparator.comparing(InterfaceDefinition::name)).toList(),
+                schema.scalars().stream().sorted(Comparator.comparing(ScalarDefinition::name)).toList());
         try {
             // Nested declaration order is retained, especially Action parameters and ordering inputs.
             String value = "registry-schema-v1:" + PropertyValues.canonical(value(canonical));
@@ -44,6 +45,8 @@ public final class SchemaFingerprint {
         if (raw.getClass().isRecord()) {
             var result = new LinkedHashMap<String, Object>();
             for (var component : raw.getClass().getRecordComponents()) {
+                // Keep fingerprints of persisted pre-scalar schemas valid without rewriting archived evidence.
+                if (raw instanceof OntologySchema schema && component.getName().equals("scalars") && schema.scalars().isEmpty()) continue;
                 try { result.put(component.getName(), value(component.getAccessor().invoke(raw))); }
                 catch (ReflectiveOperationException failure) { throw new IllegalStateException("Cannot fingerprint schema record", failure); }
             }

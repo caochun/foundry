@@ -30,6 +30,16 @@ public final class SchemaDiffer {
                 next.interfaces().stream().sorted(java.util.Comparator.comparing(org.openfoundry.foundation.spi.schema.InterfaceDefinition::name)).toList())) {
             changes.add(new SchemaChange("interfaces", "interface definitions or ancestry changed", MigrationClass.BREAKING));
         }
+        var oldScalars = new HashMap<String, org.openfoundry.foundation.spi.schema.ScalarDefinition>();
+        previous.scalars().forEach(scalar -> oldScalars.put(scalar.name(), scalar));
+        for (var scalar : next.scalars()) {
+            var old = oldScalars.remove(scalar.name());
+            if (old == null) changes.add(new SchemaChange("scalar." + scalar.name(), "scalar declared", MigrationClass.SAFE));
+            else if (!java.util.Objects.equals(old.description(), scalar.description())) {
+                changes.add(new SchemaChange("scalar." + scalar.name(), "scalar description changed", MigrationClass.SAFE));
+            }
+        }
+        oldScalars.keySet().forEach(name -> changes.add(new SchemaChange("scalar." + name, "scalar declaration removed", MigrationClass.BREAKING)));
         compareObjects(previous, next, changes);
         compareLinks(previous, next, changes);
         compareActions(previous, next, changes);

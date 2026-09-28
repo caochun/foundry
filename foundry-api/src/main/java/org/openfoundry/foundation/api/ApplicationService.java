@@ -194,7 +194,7 @@ public final class ApplicationService {
         return storage.read(context, () -> {
             if (schema == null || !objectTypes.contains(type)) throw new IllegalArgumentException("Aggregate requires a registered object type");
             var visible = visibleFields(principal, type);
-            var aggregation = new ObjectAggregationPlan(properties.get(type), visible, query);
+            var aggregation = new ObjectAggregationPlan(schema, properties.get(type), visible, query);
             var predicate = new ObjectQueryPlan(schema, properties.get(type), visible).predicate(query.filter());
             var rows = storage.queryObjects(context, type, query.sourceView()).stream()
                     .filter(object -> authorization.check(context, principal, "viewer", object.key()))
@@ -369,7 +369,7 @@ public final class ApplicationService {
             query.predicate(filter);
             query.comparator(order);
             if (aggregate != null) {
-                new ObjectAggregationPlan(properties.get(type), visible, aggregate);
+                new ObjectAggregationPlan(schema, properties.get(type), visible, aggregate);
                 new ObjectQueryPlan(schema, properties.get(type), visible).predicate(aggregate.filter());
             }
             return null;
@@ -492,7 +492,7 @@ public final class ApplicationService {
             String element = type.substring(1, type.length() - 1);
             return list.stream().map(item -> resolve(context, element, item)).toList();
         }
-        if (org.openfoundry.foundation.spi.schema.PropertyValues.SCALARS.contains(type) || enumTypes.contains(type)) return value;
+        if ((schema == null ? org.openfoundry.foundation.spi.schema.PropertyValues.SCALARS.contains(type) : schema.isScalar(type)) || enumTypes.contains(type)) return value;
         if (!objectTypes.contains(type) || !(value instanceof String id) || id.isBlank()) {
             throw new IllegalArgumentException("Object parameter must be an ID of its declared type");
         }

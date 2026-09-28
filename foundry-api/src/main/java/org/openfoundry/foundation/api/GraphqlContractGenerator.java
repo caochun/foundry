@@ -19,6 +19,13 @@ public final class GraphqlContractGenerator {
         GraphqlActionTypes.validateCoreMutationNames(schema.actionTypes());
         GraphqlActionTypes.validateNames(schema, mode == GraphqlApiRuntime.ActionMode.TYPED ? schema.actionTypes() : java.util.List.of());
         StringBuilder result = new StringBuilder("scalar JSON\nscalar Date\nscalar DateTime\nscalar Duration\nscalar URI\nscalar GeoPoint\n\n");
+        for (var scalar : schema.scalars()) {
+            if (org.openfoundry.foundation.spi.schema.PropertyValues.SCALARS.contains(scalar.name())) continue;
+            if (scalar.description() != null) {
+                result.append(graphql.language.AstPrinter.printAstCompact(graphql.language.StringValue.newStringValue(scalar.description()).build())).append("\n");
+            }
+            result.append("scalar ").append(scalar.name()).append("\n");
+        }
         schema.enums().forEach((name, values) -> result.append("enum ").append(name).append(" { ").append(String.join(" ", values)).append(" }\n"));
         for (var type : schema.interfaces()) {
             result.append("interface ").append(type.name()).append(implementsTypes(type.interfaces())).append(" {\n");

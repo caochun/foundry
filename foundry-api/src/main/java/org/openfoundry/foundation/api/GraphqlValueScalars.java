@@ -17,30 +17,38 @@ final class GraphqlValueScalars {
     static final Map<String, GraphQLScalarType> TYPES = java.util.stream.Stream.of("Date", "DateTime", "Duration", "URI", "JSON", "GeoPoint")
             .collect(java.util.stream.Collectors.toUnmodifiableMap(type -> type, GraphqlValueScalars::build));
 
+    static GraphQLScalarType custom(org.openfoundry.foundation.spi.schema.ScalarDefinition definition, OntologySchema schema) {
+        return build(definition.name(), definition.description(), schema);
+    }
+
     private static GraphQLScalarType build(String name) {
-        return GraphQLScalarType.newScalar().name(name).coercing(new Coercing<Object, Object>() {
+        return build(name, null, EMPTY);
+    }
+
+    private static GraphQLScalarType build(String name, String description, OntologySchema schema) {
+        return GraphQLScalarType.newScalar().name(name).description(description).coercing(new Coercing<Object, Object>() {
             @Override
             public Object serialize(Object value, GraphQLContext context, Locale locale) {
-                try { return normalize(name, value); }
+                try { return normalize(schema, name, value); }
                 catch (RuntimeException invalid) { throw new CoercingSerializeException("Invalid " + name + " value"); }
             }
 
             @Override
             public Object parseValue(Object value, GraphQLContext context, Locale locale) {
-                try { return normalize(name, value); }
+                try { return normalize(schema, name, value); }
                 catch (RuntimeException invalid) { throw new CoercingParseValueException("Invalid " + name + " value"); }
             }
 
             @Override
             public Object parseLiteral(Value<?> value, CoercedVariables variables, GraphQLContext context, Locale locale) {
-                try { return normalize(name, literal(value, variables)); }
+                try { return normalize(schema, name, literal(value, variables)); }
                 catch (RuntimeException invalid) { throw new CoercingParseLiteralException("Invalid " + name + " literal"); }
             }
         }).build();
     }
 
-    private static Object normalize(String type, Object value) {
-        return value == null ? null : PropertyValues.normalize(EMPTY, type, value, "$scalar");
+    private static Object normalize(OntologySchema schema, String type, Object value) {
+        return value == null ? null : PropertyValues.normalize(schema, type, value, "$scalar");
     }
 
     private static Object literal(Value<?> input, CoercedVariables variables) {

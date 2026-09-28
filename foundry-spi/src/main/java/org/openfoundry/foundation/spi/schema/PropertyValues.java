@@ -23,7 +23,7 @@ public final class PropertyValues {
         var names = new java.util.HashSet<String>();
         for (String name : java.util.stream.Stream.of(schema.objectTypes().stream().map(ObjectTypeDefinition::name),
                 schema.linkTypes().stream().map(LinkTypeDefinition::name), schema.actionTypes().stream().map(ActionTypeDefinition::name),
-                schema.enums().keySet().stream(), schema.interfaces().stream().map(InterfaceDefinition::name)).flatMap(stream -> stream).toList()) {
+                schema.enums().keySet().stream(), schema.interfaces().stream().map(InterfaceDefinition::name), schema.scalars().stream().map(ScalarDefinition::name)).flatMap(stream -> stream).toList()) {
             if (!name.matches("[A-Za-z_][A-Za-z0-9_]*") || !names.add(name)) throw new IllegalArgumentException("Invalid or duplicate schema type: " + name);
         }
         schema.enums().forEach((name, values) -> {
@@ -152,7 +152,7 @@ public final class PropertyValues {
                 base = base.substring(1, base.length() - 1);
                 if (base.endsWith("!")) base = base.substring(0, base.length() - 1);
             }
-            if (!SCALARS.contains(base) && !schema.enums().containsKey(base)) {
+            if (!schema.isScalar(base) && !schema.enums().containsKey(base)) {
                 throw new IllegalArgumentException("Unknown property type: " + field.type());
             }
             if (field.primary() && (!field.type().equals("ID") || !field.required())) {
@@ -275,7 +275,10 @@ public final class PropertyValues {
                     yield Map.of("lat", lat.doubleValue(), "lon", lon.doubleValue());
                 }
                 case "JSON" -> immutableValue(raw);
-                default -> throw invalid(field);
+                default -> {
+                    if (!schema.isScalar(type)) throw invalid(field);
+                    yield immutableValue(raw);
+                }
             };
         } catch (PropertyValidationException failure) {
             throw failure;

@@ -42,6 +42,7 @@ final class GraphqlQueryTypes {
         schema.objectTypes().forEach(type -> declared.add(type.name()));
         schema.linkTypes().forEach(type -> declared.add(type.name()));
         schema.interfaces().forEach(type -> declared.add(type.name()));
+        schema.scalars().forEach(type -> declared.add(type.name()));
         for (String name : names) if (declared.contains(name)) throw new IllegalArgumentException("Generated query type conflict: " + name);
         return names;
     }

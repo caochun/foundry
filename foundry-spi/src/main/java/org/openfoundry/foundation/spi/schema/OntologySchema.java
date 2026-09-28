@@ -8,7 +8,17 @@ public record OntologySchema(
         String version,
         List<ObjectTypeDefinition> objectTypes,
         List<LinkTypeDefinition> linkTypes,
-        List<ActionTypeDefinition> actionTypes, java.util.Map<String, java.util.List<String>> enums, List<InterfaceDefinition> interfaces) {
+        List<ActionTypeDefinition> actionTypes, java.util.Map<String, java.util.List<String>> enums, List<InterfaceDefinition> interfaces, List<ScalarDefinition> scalars) {
+
+    public OntologySchema(String namespace, String version, List<ObjectTypeDefinition> objects,
+                          List<LinkTypeDefinition> links, List<ActionTypeDefinition> actions,
+                          java.util.Map<String, List<String>> enums, List<InterfaceDefinition> interfaces) {
+        this(namespace, version, objects, links, actions, enums, interfaces, List.of());
+    }
+
+    public boolean isScalar(String name) {
+        return PropertyValues.SCALARS.contains(name) || scalars.stream().anyMatch(scalar -> scalar.name().equals(name));
+    }
 
     public OntologySchema(String namespace, String version, List<ObjectTypeDefinition> objects,
                           List<LinkTypeDefinition> links, List<ActionTypeDefinition> actions, java.util.Map<String, List<String>> enums) {
@@ -31,6 +41,7 @@ public record OntologySchema(
         linkTypes = List.copyOf(Objects.requireNonNull(linkTypes, "linkTypes must not be null"));
         enums = enums.entrySet().stream().collect(java.util.stream.Collectors.toUnmodifiableMap(java.util.Map.Entry::getKey, entry -> List.copyOf(entry.getValue())));
         interfaces = List.copyOf(interfaces);
+        scalars = scalars == null ? List.of() : List.copyOf(scalars); // Pre-scalar persisted snapshots omit this field.
         actionTypes = List.copyOf(Objects.requireNonNull(actionTypes, "actionTypes must not be null"));
     }
 }

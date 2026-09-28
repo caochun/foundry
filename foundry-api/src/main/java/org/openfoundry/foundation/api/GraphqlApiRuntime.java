@@ -81,7 +81,7 @@ public final class GraphqlApiRuntime {
             var iface = graphql.schema.GraphQLInterfaceType.newInterface().name(definition.name())
                     .typeResolver(environment -> environment.getSchema().getObjectType(entityType(environment.getObject())));
             definition.interfaces().forEach(name -> iface.withInterface(graphql.schema.GraphQLTypeReference.typeRef(name)));
-            definition.properties().forEach(property -> iface.field(field(property, enums)));
+            definition.properties().forEach(property -> iface.field(field(property, enums, schema)));
             definition.linkFields().forEach(property -> iface.field(linkField(property, application)));
             definition.computedFields().forEach(property -> iface.field(computedField(property)));
             iface.field(consentField());
@@ -91,7 +91,7 @@ public final class GraphqlApiRuntime {
         for (ObjectTypeDefinition definition : schema.objectTypes()) {
             GraphQLObjectType.Builder object = GraphQLObjectType.newObject().name(definition.name());
             definition.interfaces().forEach(name -> object.withInterface(interfaces.get(name)));
-            definition.properties().forEach(property -> object.field(field(property, enums)));
+            definition.properties().forEach(property -> object.field(field(property, enums, schema)));
             definition.linkFields().forEach(property -> object.field(linkField(property, application)));
             definition.computedFields().forEach(property -> object.field(computedField(property)));
             object.field(consentField());
@@ -102,7 +102,7 @@ public final class GraphqlApiRuntime {
         for (var definition : schema.linkTypes()) {
             var link = GraphQLObjectType.newObject().name(definition.name());
             definition.interfaces().forEach(name -> link.withInterface(interfaces.get(name)));
-            definition.properties().forEach(property -> link.field(field(property, enums)));
+            definition.properties().forEach(property -> link.field(field(property, enums, schema)));
             definition.linkFields().forEach(property -> link.field(linkField(property, application)));
             link.field(consentField());
             linkTypes.put(definition.name(), link.build());
@@ -176,6 +176,11 @@ public final class GraphqlApiRuntime {
         sets.install(query, mutation, pageInfo, aggregates.resultType());
         new GraphqlConsentTypes(application).install(query, mutation);
         GraphQLSchema.Builder graphQLSchema = GraphQLSchema.newSchema().query(query.build()).mutation(mutation.build());
+        for (var scalar : schema.scalars()) {
+            if (!org.openfoundry.foundation.spi.schema.PropertyValues.SCALARS.contains(scalar.name())) {
+                graphQLSchema.additionalType(GraphqlValueScalars.custom(scalar, schema));
+            }
+        }
         graphQLSchema.additionalTypes(new java.util.HashSet<>(interfaces.values()));
         graphQLSchema.additionalTypes(new java.util.HashSet<>(enums.values()));
         graphQLSchema.additionalTypes(new java.util.HashSet<>(linkTypes.values()));
@@ -197,8 +202,8 @@ public final class GraphqlApiRuntime {
         return request;
     }
 
-    private static GraphQLFieldDefinition field(PropertyDefinition property, Map<String, graphql.schema.GraphQLEnumType> enums) {
-        GraphQLOutputType type = scalar(property.type(), enums);
+    private static GraphQLFieldDefinition field(PropertyDefinition property, Map<String, graphql.schema.GraphQLEnumType> enums, OntologySchema schema) {
+        GraphQLOutputType type = scalar(property.type(), enums, schema);
         if (property.primary()) type = GraphQLNonNull.nonNull(type);
         return GraphQLFieldDefinition.newFieldDefinition().name(property.name()).type(type).dataFetcher(environment -> {
             Object source = environment.getSource();
@@ -265,11 +270,14 @@ public final class GraphqlApiRuntime {
         }).build();
     }
 
-    private static GraphQLOutputType scalar(String type, Map<String, graphql.schema.GraphQLEnumType> enums) {
-        if (type.endsWith("!")) return GraphQLNonNull.nonNull(scalar(type.substring(0, type.length() - 1), enums));
-        if (type.startsWith("[") && type.endsWith("]")) return GraphQLList.list(scalar(type.substring(1, type.length() - 1), enums));
+    private static GraphQLOutputType scalar(String type, Map<String, graphql.schema.GraphQLEnumType> enums, OntologySchema schema) {
+        if (type.endsWith("!")) return GraphQLNonNull.nonNull(scalar(type.substring(0, type.length() - 1), enums, schema));
+        if (type.startsWith("[") && type.endsWith("]")) return GraphQLList.list(scalar(type.substring(1, type.length() - 1), enums, schema));
         if (enums.containsKey(type)) return enums.get(type);
         if (GraphqlValueScalars.TYPES.containsKey(type)) return GraphqlValueScalars.TYPES.get(type);
+        if (!org.openfoundry.foundation.spi.schema.PropertyValues.SCALARS.contains(type) && schema.isScalar(type)) {
+            return graphql.schema.GraphQLTypeReference.typeRef(type);
+        }
         return switch (type) {
             case "ID" -> Scalars.GraphQLID;
             case "Int" -> Scalars.GraphQLInt;

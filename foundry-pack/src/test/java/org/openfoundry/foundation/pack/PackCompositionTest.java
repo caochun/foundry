@@ -144,6 +144,21 @@ class PackCompositionTest {
         assertThrows(PackLoadException.class, () -> new DomainPackLoader().loadBundle(List.of(app)));
     }
 
+    @Test
+    void customScalarsFollowPackOwnershipAndDependencyVisibility() throws Exception {
+        var core = pack("core", "example.core", "1.0.0", "", "\"External code\" scalar Code");
+        var app = pack("app", "example.app", "1.0.0", "", "type Item @objectType { id: ID! @primary code: Code! }");
+        var loader = new DomainPackLoader();
+        assertThrows(PackLoadException.class, () -> loader.loadBundle(List.of(core, app)));
+        Files.writeString(app.resolve("pack.yaml"), manifest("app", "example.app", "1.0.0", "dependencies: {example.core: '>=1.0.0'}\n"));
+        var bundle = loader.loadBundle(List.of(app, core));
+        assertEquals("example.core", bundle.typeOwners().get("Code"));
+        assertEquals("External code", bundle.ontology().schema().scalars().getFirst().description());
+        assertEquals(bundle.ontology().schemaDigest(), loader.loadBundle(List.of(core, app)).ontology().schemaDigest());
+        Files.writeString(app.resolve("schema.odl"), header("example.app", "1.0.0") + "scalar Code type Item @objectType { id: ID! @primary code: Code! }");
+        assertThrows(PackLoadException.class, () -> loader.loadBundle(List.of(core, app)));
+    }
+
     private Path pack(String name, String namespace, String version, String extra, String declarations) throws Exception {
         Path root = Files.createDirectory(temporary.resolve(name));
         Files.writeString(root.resolve("pack.yaml"), manifest(name, namespace, version, extra));

@@ -67,7 +67,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         this.clock = Objects.requireNonNull(clock);
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource must not be null");
         this.dialect = Objects.requireNonNull(dialect, "dialect must not be null");
-        this.objectMapper = new ObjectMapper();
+        this.objectMapper = new ObjectMapper().registerModule(JsonNumbers.module());
         this.activation = new JdbcSchemaActivation(dataSource, dialect, clock);
     }
 
