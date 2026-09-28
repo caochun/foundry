@@ -11,9 +11,81 @@ import java.util.Map;
 /** Framework-neutral REST route contract; an HTTP adapter can delegate to this router. */
 public final class RestApiRouter {
     private final ApplicationService application;
+    private final ObjectSetService objectSets;
 
     public RestApiRouter(ApplicationService application) {
+        this(application, null);
+    }
+
+    public RestApiRouter(ApplicationService application, org.openfoundry.foundation.spi.ObjectSetStore objectSets) {
         this.application = application;
+        this.objectSets = objectSets == null ? null : new ObjectSetService(application, objectSets);
+    }
+
+    public ApiResponse objectSets(RequestContext context, SecurityPrincipal principal, String method, String path,
+                                  Map<String, String> parameters, Map<String, Object> input) {
+        if (objectSets == null) return new ApiResponse(501, Map.of("code", "OBJECT_SETS_NOT_CONFIGURED", "error", "ObjectSet store is not configured"));
+        var parts = path.split("/");
+        try {
+            if (parts.length == 4) {
+                if (method.equals("GET")) {
+                    requireParameters(parameters, java.util.Set.of("name", "objectType"));
+                    if (parameters.containsKey("name")) {
+                        if (parameters.containsKey("objectType")) throw new IllegalArgumentException("Name lookup cannot include type filtering");
+                        var found = objectSets.getByName(context, principal, parameters.get("name"));
+                        return found == null ? ApiResponse.notFound() : ApiResponse.ok(found.toMap());
+                    }
+                    return ApiResponse.ok(objectSets.list(context, principal, parameters.get("objectType")).stream().map(org.openfoundry.foundation.spi.ObjectSetDefinition::toMap).toList());
+                }
+                if (method.equals("POST")) {
+                    requireParameters(parameters, java.util.Set.of());
+                    return new ApiResponse(201, objectSets.create(context, principal, input).toMap());
+                }
+            }
+            if (parts.length == 5) {
+                String id = parts[4];
+                switch (method) {
+                    case "GET" -> {
+                        requireParameters(parameters, java.util.Set.of());
+                        var found = objectSets.get(context, principal, id);
+                        return found == null ? ApiResponse.notFound() : ApiResponse.ok(found.toMap());
+                    }
+                    case "PUT" -> {
+                        requireParameters(parameters, java.util.Set.of());
+                        var patch = new java.util.LinkedHashMap<>(input);
+                        var expected = ObjectSetService.expectedVersion(patch.remove("expectedVersion"));
+                        return ApiResponse.ok(objectSets.update(context, principal, id, patch, expected).toMap());
+                    }
+                    case "DELETE" -> {
+                        requireParameters(parameters, java.util.Set.of("expectedVersion"));
+                        objectSets.delete(context, principal, id, ObjectSetService.expectedVersion(parameters.get("expectedVersion")));
+                        return new ApiResponse(204, Map.of());
+                    }
+                }
+            }
+            if (parts.length == 6 && method.equals("GET")) {
+                if (parts[5].equals("execute")) {
+                    requireParameters(parameters, java.util.Set.of("limit", "offset"));
+                    Integer limit = parameters.containsKey("limit") ? Integer.valueOf(parameters.get("limit")) : null;
+                    int offset = parameters.containsKey("offset") ? Integer.parseInt(parameters.get("offset")) : 0;
+                    return ApiResponse.ok(objectSets.execute(context, principal, parts[4], limit, offset));
+                }
+                if (parts[5].equals("aggregate")) {
+                    requireParameters(parameters, java.util.Set.of());
+                    return ApiResponse.ok(objectSets.aggregate(context, principal, parts[4]));
+                }
+            }
+            return ApiResponse.notFound();
+        } catch (org.openfoundry.foundation.spi.ObjectSetNotFoundException missing) {
+            return new ApiResponse(404, Map.of("code", "OBJECT_SET_NOT_FOUND", "error", "ObjectSet is not available"));
+        } catch (org.openfoundry.foundation.spi.ObjectSetConflictException changed) {
+            return new ApiResponse(409, Map.of("code", "OBJECT_SET_CONFLICT", "error", "ObjectSet changed; reload its definition", "retryable", false));
+        } catch (SecurityException denied) { return ApiResponse.forbidden(); }
+        catch (IllegalArgumentException invalid) { return ApiResponse.badRequest("Invalid ObjectSet request"); }
+    }
+
+    private static void requireParameters(Map<String, String> input, java.util.Set<String> allowed) {
+        if (!allowed.containsAll(input.keySet())) throw new IllegalArgumentException("Unknown ObjectSet query parameter");
     }
 
     public ApiResponse get(RequestContext context, SecurityPrincipal principal,

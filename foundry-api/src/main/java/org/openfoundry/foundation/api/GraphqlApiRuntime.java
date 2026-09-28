@@ -54,6 +54,11 @@ public final class GraphqlApiRuntime {
 
     public static GraphQL create(OntologySchema schema, ApplicationService application,
                                  Map<String, ActionManifest> manifests, ActionMode actionMode, QueryMode queryMode) {
+        return create(schema, application, manifests, actionMode, queryMode, null);
+    }
+
+    public static GraphQL create(OntologySchema schema, ApplicationService application, Map<String, ActionManifest> manifests,
+                                 ActionMode actionMode, QueryMode queryMode, org.openfoundry.foundation.spi.ObjectSetStore objectSets) {
         application.requireRenderingSchema(schema);
         java.util.Objects.requireNonNull(actionMode);
         java.util.Objects.requireNonNull(queryMode);
@@ -63,6 +68,7 @@ public final class GraphqlApiRuntime {
             if (type == null || !name.equals(manifests.get(name).action())) throw new IllegalArgumentException("Unregistered GraphQL action: " + name);
             return type;
         }).toList();
+        GraphqlActionTypes.validateCoreMutationNames(active);
         GraphqlActionTypes.validateNames(schema, actionMode == ActionMode.TYPED ? active : List.of());
         Map<String, graphql.schema.GraphQLEnumType> enums = new java.util.LinkedHashMap<>();
         schema.enums().forEach((name, values) -> {
@@ -163,8 +169,9 @@ public final class GraphqlApiRuntime {
                 return actionMode == ActionMode.LEGACY_JSON ? new ObjectMapper().writeValueAsString(GraphqlActionTypes.legacyResult(result)) : result;
             }).build());
         }
-        GraphQLSchema.Builder graphQLSchema = GraphQLSchema.newSchema().query(query.build());
-        if (!manifests.isEmpty()) graphQLSchema.mutation(mutation.build());
+        var sets = new GraphqlObjectSetTypes(objectSets == null ? null : new ObjectSetService(application, objectSets));
+        sets.install(query, mutation, pageInfo, aggregates.resultType());
+        GraphQLSchema.Builder graphQLSchema = GraphQLSchema.newSchema().query(query.build()).mutation(mutation.build());
         graphQLSchema.additionalTypes(new java.util.HashSet<>(interfaces.values()));
         graphQLSchema.additionalTypes(new java.util.HashSet<>(enums.values()));
         graphQLSchema.additionalTypes(new java.util.HashSet<>(linkTypes.values()));

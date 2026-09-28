@@ -16,6 +16,7 @@ public final class GraphqlContractGenerator {
     public String generate(OntologySchema schema, GraphqlApiRuntime.ActionMode mode, GraphqlApiRuntime.QueryMode queryMode) {
         java.util.Objects.requireNonNull(mode);
         java.util.Objects.requireNonNull(queryMode);
+        GraphqlActionTypes.validateCoreMutationNames(schema.actionTypes());
         GraphqlActionTypes.validateNames(schema, mode == GraphqlApiRuntime.ActionMode.TYPED ? schema.actionTypes() : java.util.List.of());
         StringBuilder result = new StringBuilder("scalar JSON\nscalar Date\nscalar DateTime\nscalar Duration\nscalar URI\nscalar GeoPoint\n\n");
         schema.enums().forEach((name, values) -> result.append("enum ").append(name).append(" { ").append(String.join(" ", values)).append(" }\n"));
@@ -41,7 +42,7 @@ public final class GraphqlContractGenerator {
             result.append("}\n\n");
         }
         result.append(GraphqlQueryTypes.sdl(schema));
-        result.append("type Query {\n");
+        result.append("type Query {\n").append(GraphqlObjectSetTypes.queriesSdl());
         for (var object : schema.objectTypes()) {
             result.append("  search").append(object.name()).append("s(query: String!, fields: [String!], filter: ").append(object.name())
                     .append("Filter, mode: SearchMode, first: Int, offset: Int, after: String): SearchResult_").append(object.name()).append("!\n");
@@ -73,7 +74,7 @@ public final class GraphqlContractGenerator {
                     result.append("type ").append(action.name()).append("Result { success: Boolean! actionId: ID! status: String! errors: [ActionError!] affectedObjects: [AffectedObject!] }\n");
                 }
             }
-            result.append("type Mutation {\n");
+            result.append("type Mutation {\n").append(GraphqlObjectSetTypes.mutationsSdl());
             for (var action : schema.actionTypes()) {
                 result.append("  ").append(lower(action.name()));
                 if (mode == GraphqlApiRuntime.ActionMode.LEGACY_JSON) result.append("(input: String!): String\n");
@@ -84,6 +85,7 @@ public final class GraphqlContractGenerator {
             }
             result.append("}\n");
         }
+        if (schema.actionTypes().isEmpty()) result.append("type Mutation {\n").append(GraphqlObjectSetTypes.mutationsSdl()).append("}\n");
         return result.toString();
     }
 

@@ -329,6 +329,23 @@ public final class ApplicationService {
         return fields.stream().collect(Collectors.toUnmodifiableMap(LinkFieldDefinition::name, field -> field));
     }
 
+    void validateObjectSetQuery(RequestContext context, SecurityPrincipal principal, String type, Map<String, Object> filter,
+                                Map<String, String> order, AggregateQuery aggregate) {
+        requireContext(context, principal);
+        storage.read(context, () -> {
+            if (schema == null || !objectTypes.contains(type)) throw new IllegalArgumentException("ObjectSet requires a registered object type");
+            var visible = visibleFields(principal, type);
+            var query = new ObjectQueryPlan(schema, properties.get(type), visible);
+            query.predicate(filter);
+            query.comparator(order);
+            if (aggregate != null) {
+                new ObjectAggregationPlan(properties.get(type), visible, aggregate);
+                new ObjectQueryPlan(schema, properties.get(type), visible).predicate(aggregate.filter());
+            }
+            return null;
+        });
+    }
+
     public ActionResult execute(ActionManifest manifest, RequestContext context, SecurityPrincipal principal,
                                 Map<String, Object> parameters, String idempotencyKey) {
         requireContext(context, principal);

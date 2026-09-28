@@ -27,7 +27,7 @@ public final class JdbcSchemaRegistry implements SchemaRegistry {
     private final String registryKey;
     private final Clock clock;
     private final ObjectMapper mapper = new ObjectMapper()
-            .registerModule(numericDefaults())
+            .registerModule(JsonNumbers.module())
             .setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY)
             .setVisibility(PropertyAccessor.GETTER, JsonAutoDetect.Visibility.NONE)
             .setVisibility(PropertyAccessor.IS_GETTER, JsonAutoDetect.Visibility.NONE);
@@ -244,21 +244,6 @@ public final class JdbcSchemaRegistry implements SchemaRegistry {
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(PropertyValues.canonical(payload).getBytes(StandardCharsets.UTF_8)));
         } catch (java.security.NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
-    }
-
-    private static com.fasterxml.jackson.databind.module.SimpleModule numericDefaults() {
-        var module = new com.fasterxml.jackson.databind.module.SimpleModule();
-        module.addDeserializer(Number.class, new com.fasterxml.jackson.databind.JsonDeserializer<Number>() {
-            @Override
-            public Number deserialize(com.fasterxml.jackson.core.JsonParser parser, com.fasterxml.jackson.databind.DeserializationContext context) throws java.io.IOException {
-                if (parser.currentToken() == com.fasterxml.jackson.core.JsonToken.VALUE_NUMBER_INT) return parser.getNumberValue();
-                var exact = parser.getDecimalValue();
-                double approximate = exact.doubleValue();
-                // Keep ordinary ODL Double defaults compatible while retaining exact programmatic decimals.
-                return Double.isFinite(approximate) && java.math.BigDecimal.valueOf(approximate).compareTo(exact) == 0 ? approximate : exact;
-            }
-        });
-        return module;
     }
 
     private String json(Object value) {

@@ -30,6 +30,8 @@ final class GraphqlAggregateTypes {
                 .field(GraphQLFieldDefinition.newFieldDefinition().name("totalGroups").type(GraphQLNonNull.nonNull(Scalars.GraphQLInt))).build();
     }
 
+    GraphQLObjectType resultType() { return result; }
+
     GraphQLFieldDefinition field(String type, String name, GraphQLInputObjectType filter, ApplicationService application) {
         return GraphQLFieldDefinition.newFieldDefinition().name(name).type(GraphQLNonNull.nonNull(result))
                 .argument(GraphQLArgument.newArgument().name("filter").type(filter))

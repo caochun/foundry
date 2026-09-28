@@ -94,7 +94,7 @@ final class ObjectQueryPlan {
     }
 
     private PropertyDefinition field(String name) {
-        var field = fields.get(name);
+        var field = name.equals("_id") ? fields.values().stream().filter(PropertyDefinition::primary).findFirst().orElse(null) : fields.get(name);
         if (field == null || operators(field.type(), schema).isEmpty()) throw new IllegalArgumentException("Unsupported query field: " + name);
         // Primary keys are already exposed independently of field masks by every entity read.
         if (!field.primary() && !visible.contains(name)) throw new SecurityException("Query field is not visible");

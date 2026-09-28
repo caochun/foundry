@@ -48,7 +48,8 @@ class GraphqlDeclarationTest {
         String sdl = new GraphqlContractGenerator().generate(schema);
         assertTrue(sdl.contains("interface Auditable"));
         assertTrue(sdl.contains("enum Status"));
-        assertFalse(sdl.contains("type Mutation"));
+        assertEquals(Set.of("createObjectSet", "updateObjectSet", "deleteObjectSet"), graph.getGraphQLSchema().getMutationType().getFieldDefinitions()
+                .stream().map(graphql.schema.GraphQLFieldDefinition::getName).collect(java.util.stream.Collectors.toSet()));
         assertDoesNotThrow(() -> new graphql.parser.Parser().parseDocument(sdl));
     }
 }

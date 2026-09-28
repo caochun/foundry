@@ -66,7 +66,16 @@ public final class JdkRestServer implements AutoCloseable {
     private void handleAuthenticated(HttpExchange exchange) throws IOException {
         ApiRequestContext context = requestContext.get();
         ApiResponse response;
-        if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && exchange.getRequestURI().getPath().matches("/api/v1/[^/]+/search")) {
+        String path = exchange.getRequestURI().getPath();
+        if (path.equals("/api/v1/object-sets") || path.startsWith("/api/v1/object-sets/")) {
+            Map<String, Object> body = Map.of();
+            if (exchange.getRequestMethod().equals("POST") || exchange.getRequestMethod().equals("PUT")) {
+                body = mapper.readValue(exchange.getRequestBody(), new com.fasterxml.jackson.core.type.TypeReference<>() {});
+                if (body == null) throw new IllegalArgumentException("ObjectSet body must be an object");
+            }
+            response = router.objectSets(context.request(), context.principal(), exchange.getRequestMethod(), path,
+                    parameters(exchange.getRequestURI().getRawQuery()), body);
+        } else if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && exchange.getRequestURI().getPath().matches("/api/v1/[^/]+/search")) {
             String type = exchange.getRequestURI().getPath().split("/")[3];
             response = router.search(context.request(), context.principal(), type, SearchQuery.fromParameters(parameters(exchange.getRequestURI().getRawQuery())));
         } else if ("GET".equalsIgnoreCase(exchange.getRequestMethod())) {
@@ -109,12 +118,17 @@ public final class JdkRestServer implements AutoCloseable {
             String[] parts = pair.split("=", 2);
             String name = java.net.URLDecoder.decode(parts[0], StandardCharsets.UTF_8);
             String value = parts.length == 2 ? java.net.URLDecoder.decode(parts[1], StandardCharsets.UTF_8) : "";
-            if (values.putIfAbsent(name, value) != null) throw new IllegalArgumentException("Duplicate search parameter");
+            if (values.putIfAbsent(name, value) != null) throw new IllegalArgumentException("Duplicate request parameter");
         }
         return values;
     }
 
     private void write(HttpExchange exchange, ApiResponse response) throws IOException {
+        if (response.status() == 204) {
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+            return;
+        }
         byte[] body = mapper.writeValueAsBytes(response.body());
         exchange.getResponseHeaders().set("content-type", "application/json");
         exchange.sendResponseHeaders(response.status(), body.length);

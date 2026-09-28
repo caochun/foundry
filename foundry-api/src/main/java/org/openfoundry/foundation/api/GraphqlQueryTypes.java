@@ -21,7 +21,8 @@ final class GraphqlQueryTypes {
         reserve(names, "SearchMode");
         for (String name : GraphqlAggregateTypes.NAMES) reserve(names, name);
         for (String scalar : scalarTypes(schema)) reserve(names, scalar + "Filter");
-        var queries = new HashSet<String>();
+        for (String name : GraphqlObjectSetTypes.NAMES) reserve(names, name);
+        var queries = new HashSet<String>(GraphqlObjectSetTypes.QUERIES);
         for (var object : schema.objectTypes()) {
             for (String suffix : List.of("Filter", "OrderBy", "Connection", "Edge")) reserve(names, object.name() + suffix);
             reserve(names, "SearchHit_" + object.name());
@@ -172,6 +173,7 @@ final class GraphqlQueryTypes {
         result.append("enum SearchMode { TERMS PHRASE }\n");
         schema.objectTypes().forEach(object -> result.append(GraphqlSearchTypes.sdl(object.name())));
         result.append(GraphqlAggregateTypes.sdl());
+        result.append(GraphqlObjectSetTypes.sdl());
         return result.toString();
     }
 }
