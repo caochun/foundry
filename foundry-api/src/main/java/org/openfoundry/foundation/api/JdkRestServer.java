@@ -48,6 +48,8 @@ public final class JdkRestServer implements AutoCloseable {
             handleAuthenticated(exchange);
         } catch (org.openfoundry.foundation.spi.schema.PropertyValidationException invalid) {
             write(exchange, new ApiResponse(400, Map.of("error", "Property validation failed", "code", invalid.code(), "field", invalid.field())));
+        } catch (org.openfoundry.foundation.spi.SchemaVersionMismatchException stale) {
+            write(exchange, new ApiResponse(409, Map.of("error", "Deployment schema must be refreshed", "code", "SCHEMA_VERSION_MISMATCH", "retryable", false)));
         } catch (org.openfoundry.foundation.spi.TransactionConflictException conflict) {
             write(exchange, new ApiResponse(409, Map.of("error", "Concurrent command conflict", "code", "TRANSACTION_CONFLICT", "retryable", true)));
         } catch (org.openfoundry.foundation.spi.TemporalHistoryUnavailableException legacy) {

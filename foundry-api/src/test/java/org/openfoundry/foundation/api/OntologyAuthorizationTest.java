@@ -214,7 +214,9 @@ class OntologyAuthorizationTest {
                 new org.openfoundry.foundation.spi.schema.ActionParameter("books", "[Book!]", true),
                 new org.openfoundry.foundation.spi.schema.ActionParameter("member", "Member", true)), "can_borrow");
         var schema = new OntologySchema(SCHEMA.namespace(), SCHEMA.version(), SCHEMA.objectTypes(), SCHEMA.linkTypes(), List.of(definition));
-        f.storage.applySchema(CONTEXT, schema);
+        if (f.storage instanceof JdbcStorageProvider jdbc) {
+            jdbc.activateSchema(CONTEXT, schema, new org.openfoundry.foundation.schema.MigrationPlan("Replace Action declarations for collection-target authorization test", true), jdbc.boundSchemaVersion());
+        } else f.storage.applySchema(CONTEXT, schema);
         try (var tx = f.storage.beginTransaction(CONTEXT)) {
             tx.createObject("Book", "other", Map.of("name", "Other"));
             tx.commit();

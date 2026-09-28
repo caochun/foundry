@@ -55,7 +55,9 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
     private final DatabaseDialect dialect;
     private final ObjectMapper objectMapper;
     private final Object schemaLock = new Object();
-    private volatile OntologySchema schema;
+    private boolean tablesInitialized;
+    private volatile JdbcSchemaActivation.Binding binding;
+    private final JdbcSchemaActivation activation;
 
     public JdbcStorageProvider(DataSource dataSource, DatabaseDialect dialect) {
         this(dataSource, dialect, Clock.systemUTC());
@@ -66,26 +68,49 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource must not be null");
         this.dialect = Objects.requireNonNull(dialect, "dialect must not be null");
         this.objectMapper = new ObjectMapper();
+        this.activation = new JdbcSchemaActivation(dataSource, dialect, clock);
     }
 
     @Override
     public void applySchema(RequestContext context, OntologySchema schema) {
         Objects.requireNonNull(context, "context must not be null");
-        Objects.requireNonNull(schema, "schema must not be null");
         propertyValidator.validateSchema(schema);
         synchronized (schemaLock) {
-            try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
+            initializeTables();
+            binding = activation.apply(context, schema, null, null, true);
+        }
+    }
+
+    /** Explicit deployment operation; approval never substitutes for current-state data validation. */
+    public org.openfoundry.foundation.schema.SchemaVersion activateSchema(RequestContext context, OntologySchema schema,
+                                                                         org.openfoundry.foundation.schema.MigrationPlan plan, int expectedActiveVersion) {
+        Objects.requireNonNull(context, "context must not be null");
+        propertyValidator.validateSchema(schema);
+        synchronized (schemaLock) {
+            initializeTables();
+            binding = activation.apply(context, schema, plan, expectedActiveVersion, false);
+            return binding.version();
+        }
+    }
+
+    public int boundSchemaVersion() {
+        var current = binding;
+        return current == null ? 0 : current.version().version();
+    }
+
+    private void initializeTables() {
+        if (tablesInitialized) return;
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(true);
+            try (Statement statement = connection.createStatement()) {
                 for (String ddl : dialect.currentTablesDdl().split(";\\s*")) {
                     if (!ddl.isBlank()) statement.execute(ddl);
                 }
-                ensureHistoryFormat(connection, "of_object_history");
-                ensureHistoryFormat(connection, "of_link_history");
-                connection.commit();
-                this.schema = schema;
-            } catch (SQLException exception) {
-                throw sqlError("apply schema", exception);
             }
-        }
+            ensureHistoryFormat(connection, "of_object_history");
+            ensureHistoryFormat(connection, "of_link_history");
+            tablesInitialized = true;
+        } catch (SQLException exception) { throw sqlError("initialize storage tables", exception); }
     }
 
     @Override
@@ -258,7 +283,8 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
     @Override
     public List<HistorySnapshot> getEntityHistory(RequestContext context, EntityKey key) {
-        boolean link = schema != null && schema.linkTypes().stream().anyMatch(type -> type.name().equals(key.type()));
+        var current = binding;
+        boolean link = current != null && current.schema().linkTypes().stream().anyMatch(type -> type.name().equals(key.type()));
         String table = link ? "of_link_history" : "of_object_history";
         String typeColumn = link ? "link_type" : "object_type";
         String idColumn = link ? "link_id" : "object_id";
@@ -308,13 +334,15 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
     @Override
     public Transaction beginTransaction(RequestContext context) {
+        var current = binding;
+        if (current == null) throw new IllegalStateException("schema has not been applied");
         initializeWriteGuard(context);
         try {
             Connection connection = dataSource.getConnection();
             // After waiting on the tenant row, subsequent reads must see the previous writer's commit.
             connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
             connection.setAutoCommit(false);
-            return new JdbcTransaction(context, connection);
+            return new JdbcTransaction(context, connection, current);
         } catch (SQLException exception) {
             throw sqlError("begin transaction", exception);
         }
@@ -502,25 +530,10 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         }
     }
 
-    private void requireObjectType(String type) {
-        if (schema == null || schema.objectTypes().stream().noneMatch(candidate -> candidate.name().equals(type))) {
-            throw new IllegalArgumentException("unknown object type: " + type);
-        }
-    }
-
-    private List<org.openfoundry.foundation.spi.schema.PropertyDefinition> objectProperties(String type) {
-        requireObjectType(type);
-        return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().properties();
-    }
-
-    private List<String> objectConstraints(String type) {
-        requireObjectType(type);
-        return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().constraints();
-    }
-
     private LinkTypeDefinition requireLinkType(String type) {
-        if (schema == null) throw new IllegalStateException("schema has not been applied");
-        return schema.linkTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst()
+        var current = binding;
+        if (current == null) throw new IllegalStateException("schema has not been applied");
+        return current.schema().linkTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("unknown link type: " + type));
     }
 
@@ -540,12 +553,37 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         private boolean closed;
         private boolean writeLocked;
         private boolean rollbackOnly;
-        private final OntologySchema transactionSchema = schema;
+        private final JdbcSchemaActivation.Binding transactionBinding;
+        private final OntologySchema schema;
         private final UniquePropertyIndex uniqueProperties = new UniquePropertyIndex();
 
-        private JdbcTransaction(RequestContext context, Connection connection) {
+        private JdbcTransaction(RequestContext context, Connection connection, JdbcSchemaActivation.Binding binding) {
             this.context = context;
             this.connection = connection;
+            this.transactionBinding = binding;
+            this.schema = binding.schema();
+        }
+
+        private void requireObjectType(String type) {
+            if (schema == null || schema.objectTypes().stream().noneMatch(candidate -> candidate.name().equals(type))) {
+                throw new IllegalArgumentException("unknown object type: " + type);
+            }
+        }
+
+        private List<org.openfoundry.foundation.spi.schema.PropertyDefinition> objectProperties(String type) {
+            requireObjectType(type);
+            return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().properties();
+        }
+
+        private List<String> objectConstraints(String type) {
+            requireObjectType(type);
+            return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().constraints();
+        }
+
+        private LinkTypeDefinition requireLinkType(String type) {
+            if (schema == null) throw new IllegalStateException("schema has not been applied");
+            return schema.linkTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException("unknown link type: " + type));
         }
 
         @Override
@@ -748,6 +786,9 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
             var existing = requireLink(findLink(type, id), type, id);
             assertVersion(existing.version(), expectedVersion);
             if (!existing.isDeleted()) throw new IllegalStateException("Relationship is not terminated");
+            if (!definition.fromType().equals(existing.from().type()) || !definition.toType().equals(existing.to().type())) {
+                throw new IllegalArgumentException("Relationship endpoints no longer match the active schema");
+            }
             requireActiveObject(existing.from());
             requireActiveObject(existing.to());
             enforceCardinality(definition, existing.from(), existing.to());
@@ -925,6 +966,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         @Override
         public void appendAudit(AuditEntry audit) {
             assertOpen();
+            lockWrites();
             if (!audit.tenantId().equals(context.tenantId())) throw new IllegalArgumentException("audit tenant mismatch");
             String sql = "INSERT INTO of_audit_records (id, tenant_id, timestamp_value, actor_id, operation_type, object_type, object_id, action_type, transaction_id, result, detail_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -938,6 +980,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         @Override
         public void enqueueOutbox(OutboxEntry event) {
             assertOpen();
+            lockWrites();
             if (!event.tenantId().equals(context.tenantId())) throw new IllegalArgumentException("event tenant mismatch");
             String sql = "INSERT INTO of_outbox_events (id, tenant_id, type, subject, occurred_at, transaction_id, data_json, published_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -950,9 +993,19 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         @Override
         public void commit() {
             assertOpen();
-            if (!Objects.equals(transactionSchema, schema)) throw new IllegalStateException("Schema changed during transaction");
-            try { connection.commit(); closed = true; connection.close(); }
-            catch (SQLException exception) { throw sqlError("commit transaction", exception); }
+            lockWrites();
+            try {
+                activation.requireBinding(connection, transactionBinding, true);
+                connection.commit();
+                closed = true;
+                connection.close();
+            } catch (SQLException exception) {
+                rollbackOnly = true;
+                throw sqlError("commit transaction", exception);
+            } catch (RuntimeException failure) {
+                rollbackOnly = true;
+                throw failure;
+            }
         }
 
         @Override
@@ -980,15 +1033,24 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         }
 
         private void lockWrites() {
-            if (!Objects.equals(transactionSchema, schema)) throw new IllegalStateException("Schema changed during transaction");
-            if (writeLocked) return;
-            try (var statement = connection.prepareStatement("SELECT tenant_id FROM of_write_guards WHERE tenant_id = ? FOR UPDATE")) {
-                statement.setString(1, context.tenantId());
-                try (var row = statement.executeQuery()) {
-                    if (!row.next()) throw new IllegalStateException("Tenant write guard missing");
+            try {
+                activation.requireBinding(connection, transactionBinding, false);
+                if (writeLocked) return;
+                try (var statement = connection.prepareStatement("SELECT tenant_id FROM of_write_guards WHERE tenant_id = ? FOR UPDATE")) {
+                    statement.setString(1, context.tenantId());
+                    try (var row = statement.executeQuery()) {
+                        if (!row.next()) throw new IllegalStateException("Tenant write guard missing");
+                    }
                 }
+                activation.requireBinding(connection, transactionBinding, false);
                 writeLocked = true;
-            } catch (SQLException failure) { throw sqlError("lock tenant writes", failure); }
+            } catch (SQLException failure) {
+                rollbackOnly = true;
+                throw sqlError("check schema and lock tenant writes", failure);
+            } catch (RuntimeException failure) {
+                rollbackOnly = true;
+                throw failure;
+            }
         }
 
         private Map<String, Map<String, Object>> currentProperties(boolean link, String type) {

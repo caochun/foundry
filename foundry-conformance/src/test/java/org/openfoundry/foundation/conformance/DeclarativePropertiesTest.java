@@ -191,7 +191,7 @@ class DeclarativePropertiesTest {
     private void newDefaults(Fixture f) {
         create(f, "old", Map.of("name", "Old"));
         var next = new OdlParser().parse(ODL.replace("quantity: Int!", "added: String @default(value: \"new\") quantity: Int!"));
-        f.storage.applySchema(CONTEXT, next);
+        activate(f.storage, next, null);
         try (var tx = f.storage.beginTransaction(CONTEXT)) {
             tx.updateObject("Item", "old", Map.of("name", "Updated"), 1);
             tx.commit();
@@ -203,7 +203,7 @@ class DeclarativePropertiesTest {
 
     private void evaluationErrors(Fixture f) {
         var broken = new OdlParser().parse(ODL.replace("this.reserved <= this.quantity", "this.missing > 0"));
-        f.storage.applySchema(CONTEXT, broken);
+        activate(f.storage, broken, new org.openfoundry.foundation.schema.MigrationPlan("Test runtime evaluation failure on an empty dataset", true));
         try (var tx = f.storage.beginTransaction(CONTEXT)) {
             var error = assertThrows(PropertyValidationException.class, () -> tx.createObject("Item", "bad", Map.of("name", "A")));
             assertEquals("CONSTRAINT_EVALUATION_ERROR", error.code());
@@ -211,6 +211,12 @@ class DeclarativePropertiesTest {
         }
         assertTrue(f.storage.queryObjects(CONTEXT, "Item", QueryOptions.defaults()).isEmpty());
         assertTrue(f.storage.getEntityHistory(CONTEXT, new EntityKey("Item", "bad")).isEmpty());
+    }
+
+    private static void activate(StorageProvider storage, OntologySchema schema, org.openfoundry.foundation.schema.MigrationPlan plan) {
+        if (storage instanceof org.openfoundry.foundation.storage.jdbc.JdbcStorageProvider jdbc) {
+            jdbc.activateSchema(CONTEXT, schema, plan, jdbc.boundSchemaVersion());
+        } else storage.applySchema(CONTEXT, schema);
     }
 
     private void create(Fixture f, String id, Map<String, Object> input) {

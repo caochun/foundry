@@ -120,6 +120,7 @@ class TransactionalReceiptTest {
     void authorizationIsRecheckedAfterWaitingForTheDatabaseWriteLock() throws Exception {
         var data = data("jdbc:h2:mem:command_wait;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000");
         var storage = provider(data);
+        var waitingStorage = provider(data);
         var ready = new java.util.concurrent.CountDownLatch(1);
         var allowed = new AtomicBoolean(true);
         var checks = new java.util.concurrent.atomic.AtomicInteger();
@@ -131,7 +132,7 @@ class TransactionalReceiptTest {
         });
         try (var pool = Executors.newSingleThreadExecutor(); var blocker = storage.beginTransaction(CONTEXT)) {
             blocker.acquireWrite();
-            var pending = pool.submit(() -> executor.execute(MANIFEST, DEFINITION, CONTEXT, ACTOR, Map.of("name", "Denied after wait"), "waiting", provider(data)));
+            var pending = pool.submit(() -> executor.execute(MANIFEST, DEFINITION, CONTEXT, ACTOR, Map.of("name", "Denied after wait"), "waiting", waitingStorage));
             assertTrue(ready.await(5, TimeUnit.SECONDS));
             allowed.set(false);
             blocker.commit();

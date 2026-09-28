@@ -40,6 +40,21 @@ public final class PropertyValidator {
         for (String expression : constraints) programs.validate(expression, false);
     }
 
+    /** Validate existing current-state facts without applying defaults, generators or any data changes. */
+    public Map<String, Object> validateExisting(OntologySchema schema, List<PropertyDefinition> fields, List<String> constraints,
+                                               String id, Map<String, Object> stored) {
+        var values = PropertyValues.validate(schema, fields, id, Map.of(), stored);
+        var view = new LinkedHashMap<>(values);
+        fields.stream().filter(PropertyDefinition::primary).forEach(field -> view.put(field.name(), id));
+        for (var field : fields) {
+            if (!values.containsKey(field.name()) && !field.primary()) continue;
+            Object value = field.primary() ? id : values.get(field.name());
+            for (String expression : field.constraints()) programs.require(expression, true, field.name(), view, value);
+        }
+        for (String expression : constraints) programs.require(expression, false, "$type", view, null);
+        return values;
+    }
+
     /** Restore the mutable part of a captured state; protected values and current schema rules remain authoritative. */
     public Map<String, Object> restore(OntologySchema schema, List<PropertyDefinition> fields, List<String> constraints,
                                       String id, Map<String, Object> desired, Map<String, Object> current,

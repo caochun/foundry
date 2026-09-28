@@ -69,46 +69,57 @@ public final class JdbcSchemaRegistry implements SchemaRegistry {
         compiler.compile(schema);
         if (expectedVersion != null && expectedVersion < 0) throw new IllegalArgumentException("Expected schema version must not be negative");
         String fingerprint = SchemaFingerprint.of(schema);
-        return locked((connection, head) -> {
-            var versions = readHistory(connection, head);
-            if (expectedVersion != null && expectedVersion != head.version()) throw new SchemaVersionConflictException(expectedVersion, head.version());
-            if (onlyIfChanged && fingerprint.equals(head.fingerprint())) return versions.getLast();
-            var diff = versions.isEmpty() ? new SchemaDiff(List.of()) : differ.diff(versions.getLast().schema(), schema);
-            if (diff.classification() == MigrationClass.BREAKING && (migrationPlan == null || !migrationPlan.approved())) {
-                throw new SchemaValidationException(List.of("breaking schema change requires an approved migration plan"));
-            }
-            int version = Math.addExact(head.version(), 1);
-            String timestamp = clock.instant().toString();
-            String snapshot = json(schema);
-            String diffJson = json(diff);
-            String migrationJson = migrationPlan == null ? null : json(migrationPlan);
-            String classification = diff.classification().name();
-            String checksum = checksum(version, snapshot, fingerprint, timestamp, diffJson, classification, migrationJson);
-            try (var insert = connection.prepareStatement("""
-                    INSERT INTO of_schema_versions
-                    (registry_key, version, format_version, snapshot_json, snapshot_digest, applied_at, diff_json, classification, migration_json, checksum)
-                    VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
-                    """)) {
-                insert.setString(1, registryKey);
-                insert.setInt(2, version);
-                insert.setString(3, snapshot);
-                insert.setString(4, fingerprint);
-                insert.setString(5, timestamp);
-                insert.setString(6, diffJson);
-                insert.setString(7, classification);
-                insert.setString(8, migrationJson);
-                insert.setString(9, checksum);
-                insert.executeUpdate();
-            }
-            try (var update = connection.prepareStatement("UPDATE of_schema_heads SET current_version = ?, fingerprint = ? WHERE registry_key = ? AND current_version = ?")) {
-                update.setInt(1, version);
-                update.setString(2, fingerprint);
-                update.setString(3, registryKey);
-                update.setInt(4, head.version());
-                if (update.executeUpdate() != 1) throw new IllegalStateException("Schema registry head changed under lock");
-            }
-            return new SchemaVersion(version, schema, Instant.parse(timestamp), diff, diff.classification(), migrationPlan);
-        });
+        return locked((connection, head) -> append(connection, head, schema, migrationPlan, expectedVersion, onlyIfChanged, fingerprint));
+    }
+
+    SchemaVersion applyInTransaction(Connection connection, OntologySchema schema, MigrationPlan plan) throws SQLException {
+        return append(connection, lockHead(connection), schema, plan, null, true, SchemaFingerprint.of(schema));
+    }
+
+    List<SchemaVersion> historyInTransaction(Connection connection) throws SQLException {
+        return readHistory(connection, lockHead(connection));
+    }
+
+    private SchemaVersion append(Connection connection, Head head, OntologySchema schema, MigrationPlan migrationPlan,
+                                 Integer expectedVersion, boolean onlyIfChanged, String fingerprint) throws SQLException {
+        var versions = readHistory(connection, head);
+        if (expectedVersion != null && expectedVersion != head.version()) throw new SchemaVersionConflictException(expectedVersion, head.version());
+        if (onlyIfChanged && fingerprint.equals(head.fingerprint())) return versions.getLast();
+        var diff = versions.isEmpty() ? new SchemaDiff(List.of()) : differ.diff(versions.getLast().schema(), schema);
+        if (diff.classification() == MigrationClass.BREAKING && (migrationPlan == null || !migrationPlan.approved())) {
+            throw new SchemaValidationException(List.of("breaking schema change requires an approved migration plan"));
+        }
+        int version = Math.addExact(head.version(), 1);
+        String timestamp = clock.instant().toString();
+        String snapshot = json(schema);
+        String diffJson = json(diff);
+        String migrationJson = migrationPlan == null ? null : json(migrationPlan);
+        String classification = diff.classification().name();
+        String checksum = checksum(version, snapshot, fingerprint, timestamp, diffJson, classification, migrationJson);
+        try (var insert = connection.prepareStatement("""
+                INSERT INTO of_schema_versions
+                (registry_key, version, format_version, snapshot_json, snapshot_digest, applied_at, diff_json, classification, migration_json, checksum)
+                VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            insert.setString(1, registryKey);
+            insert.setInt(2, version);
+            insert.setString(3, snapshot);
+            insert.setString(4, fingerprint);
+            insert.setString(5, timestamp);
+            insert.setString(6, diffJson);
+            insert.setString(7, classification);
+            insert.setString(8, migrationJson);
+            insert.setString(9, checksum);
+            insert.executeUpdate();
+        }
+        try (var update = connection.prepareStatement("UPDATE of_schema_heads SET current_version = ?, fingerprint = ? WHERE registry_key = ? AND current_version = ?")) {
+            update.setInt(1, version);
+            update.setString(2, fingerprint);
+            update.setString(3, registryKey);
+            update.setInt(4, head.version());
+            if (update.executeUpdate() != 1) throw new IllegalStateException("Schema registry head changed under lock");
+        }
+        return new SchemaVersion(version, schema, Instant.parse(timestamp), diff, diff.classification(), migrationPlan);
     }
 
     private List<SchemaVersion> readHistory(Connection connection, Head head) throws SQLException {
@@ -155,14 +166,7 @@ public final class JdbcSchemaRegistry implements SchemaRegistry {
             connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
             connection.setAutoCommit(false);
             try {
-                Head head;
-                try (var statement = connection.prepareStatement("SELECT current_version, fingerprint FROM of_schema_heads WHERE registry_key = ? FOR UPDATE")) {
-                    statement.setString(1, registryKey);
-                    try (var row = statement.executeQuery()) {
-                        if (!row.next()) throw new IllegalStateException("Schema registry head missing");
-                        head = new Head(row.getInt(1), row.getString(2));
-                    }
-                }
+                Head head = lockHead(connection);
                 T result = work.run(connection, head);
                 connection.commit();
                 return result;
@@ -173,7 +177,17 @@ public final class JdbcSchemaRegistry implements SchemaRegistry {
         } catch (SQLException failure) { throw new IllegalStateException("Schema registry transaction failed", failure); }
     }
 
-    private synchronized void initialize() {
+    private Head lockHead(Connection connection) throws SQLException {
+        try (var statement = connection.prepareStatement("SELECT current_version, fingerprint FROM of_schema_heads WHERE registry_key = ? FOR UPDATE")) {
+            statement.setString(1, registryKey);
+            try (var row = statement.executeQuery()) {
+                if (!row.next()) throw new IllegalStateException("Schema registry head missing");
+                return new Head(row.getInt(1), row.getString(2));
+            }
+        }
+    }
+
+    synchronized void initialize() {
         if (initialized) return;
         try (var connection = dataSource.getConnection()) {
             connection.setAutoCommit(true);

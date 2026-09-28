@@ -488,6 +488,9 @@ public final class InMemoryStorageProvider implements StorageProvider {
             var existing = requireLink(working.links.get(key), type, id);
             assertVersion(existing.version(), expectedVersion);
             if (!existing.isDeleted()) throw new IllegalStateException("Relationship is not terminated");
+            if (!definition.fromType().equals(existing.from().type()) || !definition.toType().equals(existing.to().type())) {
+                throw new IllegalArgumentException("Relationship endpoints no longer match the active schema");
+            }
             requireActiveObject(existing.from());
             requireActiveObject(existing.to());
             enforceCardinality(definition, existing.from(), existing.to());
