@@ -29,6 +29,14 @@ public interface Transaction extends AutoCloseable {
         throw new UnsupportedOperationException("Transactional provenance observations are not supported");
     }
 
+    default RelationshipAssertion relationshipAssertion(RelationshipScope scope) {
+        throw new UnsupportedOperationException("Relationship membership provenance is not supported");
+    }
+
+    default void observeRelationships(RelationshipScope scope, long expectedRevision) {
+        throw new UnsupportedOperationException("Relationship membership observations are not supported");
+    }
+
     default IngestionReceipt getIngestionReceipt(String key) {
         throw new UnsupportedOperationException("Transactional ingestion receipts are not supported");
     }

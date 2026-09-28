@@ -47,7 +47,7 @@ class MappingExecutionTest {
                 test(provider, "unknown custom functions fail before source reads", this::missingFunction),
                 test(provider, "primary targets are bound before source reads", this::primaryTarget),
                 test(provider, "one source can fill differently transformed target fields", this::duplicateSource),
-                test(provider, "relation declarations cannot be silently ignored by object ingestion", this::relationships)));
+                test(provider, "relation declarations are applied with object ingestion", this::relationships)));
     }
 
     private DynamicTest test(String provider, String name, Consumer<Fixture> verify) {
@@ -134,10 +134,14 @@ class MappingExecutionTest {
         var link = new RecordMapper(mapping).map(source).links().getFirst();
         assertEquals(new EntityKey("Unit", "unit-1"), link.target());
         assertEquals(Map.of("weight", 2), link.properties());
-        var read = new AtomicBoolean();
-        assertThrows(UnsupportedOperationException.class, () -> f.service.sync(connector(List.of(source), read), new SourceQuery("people", Map.of()), mapping, CTX));
-        assertFalse(read.get());
-        assertNull(f.storage.getObject(CTX, "Person", "a"));
+        try (var tx = f.storage.beginTransaction(CTX)) {
+            tx.createObject("Unit", "unit-1", Map.of("name", "Unit"));
+            tx.commit();
+        }
+        var applied = f.run(mapping, List.of(source));
+        assertTrue(applied.failures().isEmpty(), applied.failures().toString());
+        assertEquals(Map.of("created", 1), applied.relationshipChanges());
+        assertNotNull(f.storage.getObject(CTX, "Person", "a"));
         var wrong = new MappingConfig("Person", mapping.primaryKey(), mapping.properties(), List.of(new LinkMapping("Member", "Person", new KeyMapping("unit", "id", null), Map.of())));
         assertThrows(IllegalArgumentException.class, () -> MappingSchemaValidator.validate(wrong, SCHEMA));
     }

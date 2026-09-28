@@ -72,6 +72,8 @@ var sync = new MaterializedSyncService(storage).withAuthorization(policy).withTr
 
 ## 关系投影及运行边界
 
+后续更新：以下为本阶段历史边界；关系物化及拒绝限制现已由[ADR-0031](0031-transactional-relationship-ingestion.md)中的事务关系应用器接替。完整数据源运行装配仍未完成。
+
 RecordMapper返回不可变MappedLink列表。缺少未变换的外键字段不产生条目；显式null外键产生clear引用；非null值经变换后无法生成身份时拒绝，避免意外清除关系或创建名为“null”的端点。DELETE只映射实体身份，不因过时的非关键属性变换阻塞删除。
 
 这些条目是事务关系应用器的输入，不等同于已经完成关系状态协调。目前MaterializedSyncService对非空关系映射在来源I/O之前明确拒绝，保证不会只提交对象而丢弃关系。

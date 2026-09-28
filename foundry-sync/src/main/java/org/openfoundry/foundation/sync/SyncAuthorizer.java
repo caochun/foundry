@@ -9,5 +9,12 @@ import org.openfoundry.foundation.spi.Transaction;
 public interface SyncAuthorizer {
     boolean allowed(RequestContext context, String connector, MappingConfig mapping, EntityKey target, Transaction transaction);
 
+    /** Complete endpoints are provided even before a new relationship identity exists. */
+    default boolean allowedRelationship(RequestContext context, String connector, MappingConfig mapping, EntityKey relationship,
+                                        EntityKey from, EntityKey to, Transaction transaction) {
+        return allowed(context, connector, mapping, relationship, transaction)
+                && allowed(context, connector, mapping, from, transaction) && allowed(context, connector, mapping, to, transaction);
+    }
+
     static SyncAuthorizer denyAll() { return (context, connector, mapping, target, transaction) -> false; }
 }

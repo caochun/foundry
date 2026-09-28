@@ -100,6 +100,9 @@ final class SchemaBoundStorage implements StorageProvider {
     @Override public List<HistorySnapshot> getEntityHistory(RequestContext context, EntityKey key) {
         return read(context, () -> delegate.getEntityHistory(context, key));
     }
+    @Override public List<RelationshipAssertion> getRelationshipAssertions(RequestContext context, RelationshipScope scope, int limit, Long beforeRevision) {
+        return read(context, () -> delegate.getRelationshipAssertions(context, scope, limit, beforeRevision));
+    }
     @Override public IngestionCheckpoint getIngestionCheckpoint(RequestContext context, String key) {
         return read(context, () -> delegate.getIngestionCheckpoint(context, key));
     }

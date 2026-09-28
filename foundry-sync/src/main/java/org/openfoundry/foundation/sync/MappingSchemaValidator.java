@@ -21,6 +21,13 @@ public final class MappingSchemaValidator {
             }
             key(link.toKey(), object(schema, link.toType()).properties());
             properties(link.properties(), definition.properties());
+            if (definition.properties().stream().anyMatch(field -> field.primary() && link.properties().containsKey(field.name()))) {
+                throw new IllegalArgumentException("Relationship identities are managed by the reconciliation applier");
+            }
+            boolean single = definition.cardinality() == Cardinality.ONE_TO_ONE || definition.cardinality() == Cardinality.MANY_TO_ONE;
+            if (single && mapping.links().stream().filter(candidate -> candidate.linkType().equals(link.linkType())).count() != 1) {
+                throw new IllegalArgumentException("Single-valued relationship mappings require one slot");
+            }
         }
     }
 

@@ -168,7 +168,15 @@ public interface DatabaseDialect {
                   source_sequence BIGINT NOT NULL, token_json %s NOT NULL, source_system VARCHAR(255) NOT NULL,
                   configuration_hash VARCHAR(64) NOT NULL, PRIMARY KEY (tenant_id, checkpoint_key)
                 );
-                """.formatted(text, text);
+                """.formatted(text, text) + """
+                CREATE TABLE IF NOT EXISTS of_relationship_assertions (
+                  tenant_id VARCHAR(255) NOT NULL, scope_key VARCHAR(64) NOT NULL, revision BIGINT NOT NULL,
+                  endpoint_type VARCHAR(255) NOT NULL, endpoint_id VARCHAR(512) NOT NULL, link_type VARCHAR(255) NOT NULL,
+                  direction VARCHAR(16) NOT NULL, operation VARCHAR(32), link_id VARCHAR(512), recorded_at %s NOT NULL,
+                  transaction_id VARCHAR(255) NOT NULL, actor_id VARCHAR(255), source_json %s NOT NULL,
+                  PRIMARY KEY (tenant_id, scope_key, revision)
+                );
+                """.formatted(timestamp, text);
     }
 
     static DatabaseDialect h2() {

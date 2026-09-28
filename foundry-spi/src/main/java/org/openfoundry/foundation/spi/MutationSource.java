@@ -26,6 +26,17 @@ public record MutationSource(Kind kind, String name, String operationId, Instant
         return new MutationSource(Kind.DIRECT, "direct", transactionId, at, Map.of());
     }
 
+    public Map<String, Object> toMap() {
+        return Map.of("kind", kind.name(), "name", name, "operationId", operationId, "producedAt", producedAt.toString(), "details", details);
+    }
+
+    public static MutationSource fromMap(Map<String, Object> source) {
+        if (!source.keySet().equals(java.util.Set.of("kind", "name", "operationId", "producedAt", "details"))) throw new IllegalStateException("Invalid mutation source fields");
+        @SuppressWarnings("unchecked") var details = (Map<String, Object>) source.get("details");
+        return new MutationSource(Kind.valueOf((String) source.get("kind")), (String) source.get("name"), (String) source.get("operationId"),
+                Instant.parse((String) source.get("producedAt")), details);
+    }
+
     public String actionId() { return kind == Kind.ACTION ? operationId : null; }
     public String sourceSystem() { return kind == Kind.SYNC ? name : null; }
 }

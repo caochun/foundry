@@ -22,6 +22,8 @@ import org.openfoundry.foundation.spi.LineageQuery;
 import org.openfoundry.foundation.spi.LineageValues;
 import org.openfoundry.foundation.spi.IngestionReceipt;
 import org.openfoundry.foundation.spi.IngestionCheckpoint;
+import org.openfoundry.foundation.spi.RelationshipScope;
+import org.openfoundry.foundation.spi.RelationshipAssertion;
 import java.time.Clock;
 import org.openfoundry.foundation.spi.schema.PropertyValues;
 import org.openfoundry.foundation.spi.schema.UniquePropertyIndex;
@@ -53,7 +55,7 @@ import java.util.UUID;
 public final class JdbcStorageProvider implements StorageProvider, AutoCloseable {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
     private static final StorageCapabilities CAPABILITIES = new StorageCapabilities(
-            true, true, false, false, false, true, false, true, true, true);
+            true, true, false, false, false, true, false, true, true, true, true);
 
     private final DataSource dataSource;
     private final Clock clock;
@@ -61,6 +63,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
     private final DatabaseDialect dialect;
     private final ObjectMapper objectMapper;
     private final JdbcLineage lineage;
+    private final JdbcRelationshipAssertions relationshipAssertions;
     private final Object schemaLock = new Object();
     private boolean tablesInitialized;
     private volatile JdbcSchemaActivation.Binding binding;
@@ -76,6 +79,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         this.dialect = Objects.requireNonNull(dialect, "dialect must not be null");
         this.objectMapper = new ObjectMapper().registerModule(JsonNumbers.module());
         this.lineage = new JdbcLineage(dialect, objectMapper);
+        this.relationshipAssertions = new JdbcRelationshipAssertions(dialect, objectMapper);
         this.activation = new JdbcSchemaActivation(dataSource, dialect, clock);
     }
 
@@ -357,6 +361,14 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                         jsonMap(row.getString("token_json")).get("value"), row.getString("source_system"), row.getString("configuration_hash")) : null;
             }
         }
+    }
+
+    @Override
+    public List<RelationshipAssertion> getRelationshipAssertions(RequestContext context, RelationshipScope scope, int limit, Long beforeRevision) {
+        return schemaRead(context, () -> {
+            try (var connection = dataSource.getConnection()) { return relationshipAssertions.read(connection, context, scope, limit, beforeRevision); }
+            catch (SQLException failure) { throw sqlError("read relationship scope history", failure); }
+        });
     }
 
     @Override
@@ -746,6 +758,34 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
             try { lineage.append(connection, context, key, expectedVersion, transactionId, values, source, now); }
             catch (SQLException failure) { throw sqlError("record provenance observation", failure); }
             catch (RuntimeException | Error failure) { rollbackOnly = true; throw failure; }
+        }
+
+        @Override
+        public RelationshipAssertion relationshipAssertion(RelationshipScope scope) {
+            assertOpen();
+            validateScope(scope);
+            try {
+                var rows = relationshipAssertions.read(connection, context, scope, 1, null);
+                return rows.isEmpty() ? null : rows.getFirst();
+            } catch (SQLException failure) { throw sqlError("read relationship scope", failure); }
+        }
+
+        @Override
+        public void observeRelationships(RelationshipScope scope, long expectedRevision) {
+            assertOpen();
+            lockWrites();
+            validateScope(scope);
+            var now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            freezeSource(now);
+            try { relationshipAssertions.append(connection, context, scope, null, null, source, now, transactionId, expectedRevision); }
+            catch (SQLException failure) { throw sqlError("record relationship observation", failure); }
+            catch (RuntimeException | Error failure) { rollbackOnly = true; throw failure; }
+        }
+
+        private void validateScope(RelationshipScope scope) {
+            var definition = requireLinkType(scope.linkType());
+            String endpoint = scope.direction() == Direction.OUTBOUND ? definition.fromType() : definition.toType();
+            if (!endpoint.equals(scope.endpoint().type())) throw new IllegalArgumentException("Relationship scope endpoint mismatch");
         }
 
         @Override
@@ -1400,6 +1440,12 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setTimestamp(10, timestamp(validFrom)); setNullableTimestamp(statement, 11, validTo); statement.setTimestamp(12, timestamp(recordedAt)); statement.setString(13, transactionId); statement.setString(14, context.actorId()); statement.setString(15, json(state)); statement.executeUpdate();
             }
             recordFactSource(true, type, id, version, operation, previous, state, recordedAt);
+            if (operation != EntityOperation.UPDATED) {
+                try {
+                    relationshipAssertions.append(connection, context, new RelationshipScope(from, type, Direction.OUTBOUND), operation, id, source, recordedAt, transactionId, null);
+                    relationshipAssertions.append(connection, context, new RelationshipScope(to, type, Direction.INBOUND), operation, id, source, recordedAt, transactionId, null);
+                } catch (RuntimeException | Error failure) { rollbackOnly = true; throw failure; }
+            }
         }
 
         private void recordFactSource(boolean relationship, String type, String id, long version, EntityOperation operation,

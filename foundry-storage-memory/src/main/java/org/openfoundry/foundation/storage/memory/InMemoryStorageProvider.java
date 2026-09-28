@@ -19,6 +19,8 @@ import org.openfoundry.foundation.spi.LineageQuery;
 import org.openfoundry.foundation.spi.LineageValues;
 import org.openfoundry.foundation.spi.IngestionReceipt;
 import org.openfoundry.foundation.spi.IngestionCheckpoint;
+import org.openfoundry.foundation.spi.RelationshipScope;
+import org.openfoundry.foundation.spi.RelationshipAssertion;
 import java.time.Clock;
 import org.openfoundry.foundation.spi.schema.PropertyValues;
 import org.openfoundry.foundation.spi.schema.UniquePropertyIndex;
@@ -47,7 +49,7 @@ import java.util.UUID;
  */
 public final class InMemoryStorageProvider implements StorageProvider {
     private static final StorageCapabilities CAPABILITIES = new StorageCapabilities(
-            true, true, false, false, false, true, false, true, true, true);
+            true, true, false, false, false, true, false, true, true, true, true);
 
     private final Object monitor = new Object();
     private final Clock clock;
@@ -226,6 +228,16 @@ public final class InMemoryStorageProvider implements StorageProvider {
         synchronized (monitor) { return state.checkpoints.get(objectKey(context, "__ingestion", key)); }
     }
 
+    @Override
+    public List<RelationshipAssertion> getRelationshipAssertions(RequestContext context, RelationshipScope scope, int limit, Long beforeRevision) {
+        if (limit < 0 || limit > 1000 || beforeRevision != null && beforeRevision < 1) throw new IllegalArgumentException("Invalid relationship assertion page");
+        synchronized (monitor) {
+            return state.relationshipAssertions.getOrDefault(objectKey(context, "__relationships", scope.key()), List.of()).stream()
+                    .filter(value -> beforeRevision == null || value.revision() < beforeRevision)
+                    .sorted(Comparator.comparingLong(RelationshipAssertion::revision).reversed()).limit(limit).toList();
+        }
+    }
+
     public List<AuditEntry> auditEntries(RequestContext context) {
         synchronized (monitor) {
             return state.audits.stream().filter(entry -> entry.tenantId().equals(context.tenantId())).toList();
@@ -395,6 +407,37 @@ public final class InMemoryStorageProvider implements StorageProvider {
                 values.put(field, new LineageValues.Value(present, LineageValues.hash(present, value)));
             }
             appendLineage(key, expectedVersion, values, clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS));
+        }
+
+        @Override
+        public RelationshipAssertion relationshipAssertion(RelationshipScope scope) {
+            assertOpen();
+            validateScope(scope);
+            var entries = working.relationshipAssertions.getOrDefault(objectKey(context, "__relationships", scope.key()), List.of());
+            return entries.isEmpty() ? null : entries.getLast();
+        }
+
+        @Override
+        public void observeRelationships(RelationshipScope scope, long expectedRevision) {
+            assertOpen();
+            var previous = relationshipAssertion(scope);
+            if ((previous == null ? 0 : previous.revision()) != expectedRevision) throw new org.openfoundry.foundation.spi.TransactionConflictException("Relationship scope changed");
+            appendRelationshipAssertion(scope, null, null, clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS));
+        }
+
+        private void validateScope(RelationshipScope scope) {
+            var definition = requireLinkType(scope.linkType());
+            String endpoint = scope.direction() == Direction.OUTBOUND ? definition.fromType() : definition.toType();
+            if (!endpoint.equals(scope.endpoint().type())) throw new IllegalArgumentException("Relationship scope endpoint mismatch");
+        }
+
+        private void appendRelationshipAssertion(RelationshipScope scope, EntityOperation operation, String id, Instant now) {
+            freezeSource(now);
+            try {
+                var entries = working.relationshipAssertions.computeIfAbsent(objectKey(context, "__relationships", scope.key()), ignored -> new ArrayList<>());
+                long revision = entries.isEmpty() ? 1 : Math.incrementExact(entries.getLast().revision());
+                entries.add(new RelationshipAssertion(scope, revision, operation, id, now, transactionId, context.actorId(), source));
+            } catch (RuntimeException | Error failure) { rollbackOnly = true; throw failure; }
         }
 
         @Override
@@ -802,6 +845,12 @@ public final class InMemoryStorageProvider implements StorageProvider {
             appendLineage(key, version, LineageValues.changes(definitions, previous, snapshot, operation), recordedAt);
             history.add(new HistorySnapshot(key, version, operation, validFrom, validTo,
                     recordedAt, transactionId, source.actionId(), context.actorId(), source.sourceSystem(), snapshot));
+            if (operation != EntityOperation.UPDATED && snapshot.containsKey("_fromType")) {
+                var from = new EntityKey((String) snapshot.get("_fromType"), (String) snapshot.get("_fromId"));
+                var to = new EntityKey((String) snapshot.get("_toType"), (String) snapshot.get("_toId"));
+                appendRelationshipAssertion(new RelationshipScope(from, key.type(), Direction.OUTBOUND), operation, key.id(), recordedAt);
+                appendRelationshipAssertion(new RelationshipScope(to, key.type(), Direction.INBOUND), operation, key.id(), recordedAt);
+            }
         }
 
         private void freezeSource(Instant now) {
@@ -939,20 +988,22 @@ public final class InMemoryStorageProvider implements StorageProvider {
         private final Map<String, List<FieldProvenance>> lineage;
         private final Map<String, IngestionReceipt> ingestionReceipts;
         private final Map<String, IngestionCheckpoint> checkpoints;
+        private final Map<String, List<RelationshipAssertion>> relationshipAssertions;
         private final List<AuditEntry> audits;
         private final List<OutboxEntry> outbox;
         private final Map<String, org.openfoundry.foundation.spi.CommandReceipt> receipts;
         private final Map<String, org.openfoundry.foundation.spi.ActionExecution> executions;
 
         private State() {
-            this(new HashMap<>(), new HashMap<>(), new HashMap<>(), new ArrayList<>(), new ArrayList<>(), new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashMap<>());
+            this(new HashMap<>(), new HashMap<>(), new HashMap<>(), new ArrayList<>(), new ArrayList<>(), new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashMap<>());
         }
 
         private State(Map<String, ObjectRecord> objects, Map<String, LinkRecord> links,
                       Map<String, List<HistorySnapshot>> history, List<AuditEntry> audits,
                       List<OutboxEntry> outbox, Map<String, org.openfoundry.foundation.spi.CommandReceipt> receipts,
                       Map<String, org.openfoundry.foundation.spi.ActionExecution> executions, Map<String, List<FieldProvenance>> lineage,
-                      Map<String, IngestionReceipt> ingestionReceipts, Map<String, IngestionCheckpoint> checkpoints) {
+                      Map<String, IngestionReceipt> ingestionReceipts, Map<String, IngestionCheckpoint> checkpoints,
+                      Map<String, List<RelationshipAssertion>> relationshipAssertions) {
             this.objects = objects;
             this.links = links;
             this.history = history;
@@ -963,6 +1014,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
             this.lineage = lineage;
             this.ingestionReceipts = ingestionReceipts;
             this.checkpoints = checkpoints;
+            this.relationshipAssertions = relationshipAssertions;
         }
 
         private State copy() {
@@ -970,8 +1022,10 @@ public final class InMemoryStorageProvider implements StorageProvider {
             history.forEach((key, value) -> copiedHistory.put(key, new ArrayList<>(value)));
             var copiedLineage = new HashMap<String, List<FieldProvenance>>();
             lineage.forEach((key, value) -> copiedLineage.put(key, new ArrayList<>(value)));
+            var copiedAssertions = new HashMap<String, List<RelationshipAssertion>>();
+            relationshipAssertions.forEach((key, value) -> copiedAssertions.put(key, new ArrayList<>(value)));
             return new State(new HashMap<>(objects), new HashMap<>(links), copiedHistory,
-                    new ArrayList<>(audits), new ArrayList<>(outbox), new HashMap<>(receipts), new HashMap<>(executions), copiedLineage, new HashMap<>(ingestionReceipts), new HashMap<>(checkpoints));
+                    new ArrayList<>(audits), new ArrayList<>(outbox), new HashMap<>(receipts), new HashMap<>(executions), copiedLineage, new HashMap<>(ingestionReceipts), new HashMap<>(checkpoints), copiedAssertions);
         }
     }
 }

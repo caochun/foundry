@@ -45,6 +45,10 @@ public interface StorageProvider {
         throw new UnsupportedOperationException("Ingestion checkpoints are not supported");
     }
 
+    default List<RelationshipAssertion> getRelationshipAssertions(RequestContext context, RelationshipScope scope, int limit, Long beforeRevision) {
+        throw new UnsupportedOperationException("Relationship membership history is not supported");
+    }
+
     Transaction beginTransaction(RequestContext context);
 
     /** Local immutable binding, or null before schema initialization. */

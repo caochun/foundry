@@ -53,7 +53,7 @@ public final class MaterializedSyncService {
         var binding = Objects.requireNonNull(storage.schemaBinding(), "Apply the schema before ingestion");
         storage.requireSchemaBinding(context, binding);
         MappingSchemaValidator.validate(mapping, binding.schema());
-        if (!mapping.links().isEmpty()) throw new UnsupportedOperationException("Relationship mapping requires an explicit relationship reconciliation applier");
+        if (!mapping.links().isEmpty() && !storage.capabilities().relationshipAssertions()) throw new UnsupportedOperationException("Relationship sync requires transactional membership provenance");
         var definition = binding.schema().objectTypes().stream().filter(type -> type.name().equals(mapping.objectType())).findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("Unknown mapping object type"));
         var fields = new LinkedHashMap<String, PropertyDefinition>();
@@ -64,6 +64,15 @@ public final class MaterializedSyncService {
         var governedFields = fields.values().stream().filter(field -> !field.primary() && !field.readOnly()).map(PropertyDefinition::name)
                 .collect(java.util.stream.Collectors.toSet());
         governedFields.add("_entity");
+        if (!mapping.links().isEmpty()) {
+            if (fields.containsKey("links") && conflicts.configuredFields().contains("links")) throw new IllegalArgumentException("links conflict rule is ambiguous with a stored property; use relationship-type rules");
+            governedFields.add("links");
+            for (var link : mapping.links()) {
+                governedFields.add("links." + link.linkType());
+                binding.schema().linkTypes().stream().filter(type -> type.name().equals(link.linkType())).findFirst().orElseThrow().properties().stream()
+                        .filter(field -> !field.primary() && !field.readOnly()).forEach(field -> governedFields.add("links." + link.linkType() + "." + field.name()));
+            }
+        }
         if (!governedFields.containsAll(conflicts.configuredFields())) throw new IllegalArgumentException("Conflict policy names an unknown or managed field");
         String runId = "sync_" + UUID.randomUUID();
         var mapper = new RecordMapper(mapping, transforms);
@@ -77,8 +86,9 @@ public final class MaterializedSyncService {
                 try {
                     var mapped = mapper.map(source);
                     var values = normalize(binding.schema(), fields, mapped);
+                    var links = RelationshipSync.normalize(binding.schema(), mapped.links());
                     var origin = origin(connector.name(), mapper.fingerprint(), source, runId, binding.id());
-                    var outcome = apply(context, connector.name(), mapping, source, mapped.key(), values, origin, configuration, fields, binding);
+                    var outcome = apply(context, connector.name(), mapping, source, mapped.key(), values, links, origin, configuration, fields, binding);
                     counts.add(outcome);
                 } catch (RuntimeException failure) {
                     failures.add(new SyncFailure(source.sourceSystem(), source.sourceRecordId(), failure.getMessage()));
@@ -86,15 +96,16 @@ public final class MaterializedSyncService {
                 }
             }
         }
-        return new SyncResult(counts.created, counts.updated, counts.deleted, counts.restored, counts.observed, counts.ignored, counts.replayed, counts.conflicts, failures);
+        return new SyncResult(counts.created, counts.updated, counts.deleted, counts.restored, counts.observed, counts.ignored, counts.replayed, counts.conflicts, failures, counts.relationshipChanges);
     }
 
     private Outcome apply(RequestContext context, String connector, MappingConfig mapping, SourceRecord source, EntityKey key,
-                          Map<String, Object> values, MutationSource origin, String configuration,
+                          Map<String, Object> values, List<MappedLink> links, MutationSource origin, String configuration,
                           Map<String, PropertyDefinition> fields, SchemaBinding binding) {
         String receiptKey = receiptKey(connector, mapping, source);
         String checkpointKey = source.position() == null ? null : checkpointKey(connector, mapping, source.position().partition());
         String fingerprint = fingerprint(source, key, values, origin.producedAt(), configuration);
+        if (!mapping.links().isEmpty()) fingerprint = LineageValues.hash(true, List.of("relationship-ingestion-v1", fingerprint, RelationshipSync.input(links)));
         for (int attempt = 0; attempt < 8; attempt++) {
             try (var tx = storage.beginTransaction(context, binding)) {
                 tx.acquireWrite();
@@ -106,7 +117,11 @@ public final class MaterializedSyncService {
                 var receipt = receiptKey == null ? null : tx.getIngestionReceipt(receiptKey);
                 if (receipt != null) {
                     if (!receipt.requestHash().equals(fingerprint) || !receipt.target().equals(key)) throw new IllegalArgumentException("Source event identity was reused with different content or configuration");
-                    verifyReceipt(receipt, tx.getObject(key.type(), key.id()));
+                    verifyReceipt(receipt, tx.getObject(key.type(), key.id()), !mapping.links().isEmpty());
+                    if (!mapping.links().isEmpty()) {
+                        RelationshipSync.verifyEvidence(receipt.result().get("relationships"), receipt.result().get("relationshipDigest"), binding.schema(), mapping, key,
+                                context, connector, authorizer, tx);
+                    }
                     if (source.position() != null && (checkpoint == null || checkpoint.sequence() < source.position().sequence())) throw new IllegalStateException("Receipt and checkpoint disagree");
                     requireTarget(context, connector, mapping, key, tx);
                     return new Outcome("REPLAYED", Map.of());
@@ -115,22 +130,39 @@ public final class MaterializedSyncService {
                 tx.mutationSource(origin);
                 var existing = tx.getObject(key.type(), key.id());
                 var lineage = tx.latestLineage(key);
-                var outcome = applyValues(tx, key, source.operation(), values, existing, lineage, origin, fields);
+                var relationships = mapping.links().isEmpty() ? null : new RelationshipSync(binding.schema(), mapping, connector, source, key,
+                        links, origin, conflicts, unknownOrigins, authorizer, context, tx);
+                boolean blockedDelete = source.operation().equals("DELETE") && relationships != null && relationships.rejected();
+                var outcome = blockedDelete ? new Outcome("IGNORED", Map.of()) : applyValues(tx, key, source.operation(), values, existing, lineage, origin, fields);
                 requireTarget(context, connector, mapping, key, tx);
                 var current = tx.getObject(key.type(), key.id());
+                if (relationships != null) {
+                    boolean enabled = !blockedDelete && (source.operation().equals("DELETE") ? current == null || current.isDeleted() : current != null && !current.isDeleted());
+                    relationships.apply(enabled);
+                    relationships.reauthorize();
+                    var decisions = new LinkedHashMap<>(outcome.decisions());
+                    decisions.putAll(relationships.decisions());
+                    String operation = outcome.operation().equals("IGNORED") && relationships.observed() ? "OBSERVED" : outcome.operation();
+                    outcome = new Outcome(operation, decisions, relationships.changes());
+                }
                 if (receiptKey != null) {
                     var result = new LinkedHashMap<String, Object>();
-                    result.put("format", 1);
+                    result.put("format", relationships == null ? 1 : 2);
                     result.put("operation", outcome.operation());
                     result.put("entityVersion", current == null ? 0L : current.version());
                     result.put("factHash", current == null ? null : factHash(current));
+                    if (relationships != null) {
+                        var evidence = relationships.evidence();
+                        result.put("relationships", evidence);
+                        result.put("relationshipDigest", LineageValues.hash(true, evidence));
+                    }
                     tx.putIngestionReceipt(new IngestionReceipt(receiptKey, fingerprint, key, result));
                 }
                 if (source.position() != null) {
                     tx.putIngestionCheckpoint(new IngestionCheckpoint(checkpointKey, checkpoint == null ? 1 : Math.incrementExact(checkpoint.version()),
                             source.position().sequence(), source.position().checkpoint(), source.sourceSystem(), configuration), checkpoint == null ? 0 : checkpoint.version());
                 }
-                if (receiptKey != null || !outcome.operation().equals("IGNORED") || outcome.conflicts() > 0) {
+                if (receiptKey != null || !outcome.operation().equals("IGNORED") || outcome.conflicts() > 0 || !outcome.relationshipChanges().isEmpty()) {
                     var detail = new LinkedHashMap<String, Object>();
                     detail.put("connector", connector);
                     detail.put("sourceSystem", source.sourceSystem());
@@ -138,6 +170,7 @@ public final class MaterializedSyncService {
                     detail.put("runId", origin.operationId());
                     detail.put("operation", outcome.operation());
                     detail.put("decisions", outcome.decisions());
+                    if (!mapping.links().isEmpty()) detail.put("relationshipChanges", outcome.relationshipChanges());
                     if (receiptKey != null) detail.put("receiptKey", receiptKey);
                     Instant now = clock.instant();
                     String id = UUID.randomUUID().toString();
@@ -148,6 +181,7 @@ public final class MaterializedSyncService {
                         case "OBSERVED" -> "openfoundry.sync.observed";
                         default -> "openfoundry.sync.applied";
                     };
+                    if (!outcome.relationshipChanges().isEmpty()) topic = "openfoundry.sync.applied";
                     tx.enqueueOutbox(new OutboxEntry("sync_event_" + id, context.tenantId(), topic,
                             key.type() + "/" + key.id(), now, tx.transactionId(), detail));
                     for (var decision : outcome.decisions().entrySet()) {
@@ -157,6 +191,7 @@ public final class MaterializedSyncService {
                     }
                 }
                 requireTarget(context, connector, mapping, key, tx);
+                if (relationships != null) relationships.reauthorize();
                 tx.commit();
                 return outcome;
             } catch (TransactionConflictException conflict) {
@@ -314,10 +349,14 @@ public final class MaterializedSyncService {
                 source.operation(), values, producedAt.toString(), position, reported));
     }
 
-    private static void verifyReceipt(IngestionReceipt receipt, ObjectRecord current) {
+    private static void verifyReceipt(IngestionReceipt receipt, ObjectRecord current, boolean relationships) {
         var result = receipt.result();
-        if (!result.keySet().equals(Set.of("format", "operation", "entityVersion", "factHash"))
-                || !(result.get("format") instanceof Integer || result.get("format") instanceof Long) || ((Number) result.get("format")).longValue() != 1
+        if (!(result.get("format") instanceof Integer || result.get("format") instanceof Long)) throw new IllegalStateException("Invalid source receipt format");
+        long format = ((Number) result.get("format")).longValue();
+        if (format != (relationships ? 2 : 1)) throw new IllegalStateException("Receipt format disagrees with relationship mapping");
+        var keys = format == 1 ? Set.of("format", "operation", "entityVersion", "factHash")
+                : Set.of("format", "operation", "entityVersion", "factHash", "relationships", "relationshipDigest");
+        if (!result.keySet().equals(keys) || format != 1 && format != 2
                 || !(result.get("entityVersion") instanceof Integer || result.get("entityVersion") instanceof Long) || ((Number) result.get("entityVersion")).longValue() < 0
                 || !Set.of("CREATED", "UPDATED", "DELETED", "RESTORED", "OBSERVED", "IGNORED").contains(result.get("operation"))) {
             throw new IllegalStateException("Invalid source receipt");
@@ -345,7 +384,7 @@ public final class MaterializedSyncService {
         };
     }
     private static boolean sameObservation(MutationSource a, MutationSource b) {
-        return a.kind() == b.kind() && a.name().equals(b.name()) && a.producedAt().equals(b.producedAt()) && a.details().equals(b.details());
+        return a.kind() == b.kind() && a.name().equals(b.name()) && a.producedAt().equals(b.producedAt()) && PropertyValues.canonical(a.details()).equals(PropertyValues.canonical(b.details()));
     }
 
     private static Outcome outcome(String operation, ConflictResolver.Resolution resolution) {
@@ -356,18 +395,25 @@ public final class MaterializedSyncService {
         }
         return new Outcome(operation, PropertyValues.immutableMap(decisions));
     }
-    private record Outcome(String operation, Map<String, Object> decisions) {
+    private record Outcome(String operation, Map<String, Object> decisions, Map<String, Integer> relationshipChanges) {
+        Outcome(String operation, Map<String, Object> decisions) { this(operation, decisions, Map.of()); }
         int conflicts() { return decisions.size(); }
     }
     public record SyncFailure(String sourceSystem, String sourceRecordId, String reason) {}
-    public record SyncResult(int created, int updated, int deleted, int restored, int observed, int ignored, int replayed, int conflicts, List<SyncFailure> failures) {
+    public record SyncResult(int created, int updated, int deleted, int restored, int observed, int ignored, int replayed, int conflicts, List<SyncFailure> failures,
+                             Map<String, Integer> relationshipChanges) {
+        public SyncResult(int created, int updated, int deleted, int restored, int observed, int ignored, int replayed, int conflicts, List<SyncFailure> failures) {
+            this(created, updated, deleted, restored, observed, ignored, replayed, conflicts, failures, Map.of());
+        }
         public SyncResult(int created, int updated, int deleted, List<SyncFailure> failures) { this(created, updated, deleted, 0, 0, 0, 0, 0, failures); }
-        public SyncResult { failures = List.copyOf(failures); }
+        public SyncResult { failures = List.copyOf(failures); relationshipChanges = Map.copyOf(relationshipChanges); }
     }
     private static final class Counts {
         int created, updated, deleted, restored, observed, ignored, replayed, conflicts;
+        final Map<String, Integer> relationshipChanges = new LinkedHashMap<>();
         void add(Outcome result) {
             conflicts += result.conflicts();
+            result.relationshipChanges().forEach((name, count) -> relationshipChanges.merge(name, count, Integer::sum));
             switch (result.operation()) {
                 case "CREATED" -> created++;
                 case "UPDATED" -> updated++;
