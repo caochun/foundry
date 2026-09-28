@@ -290,6 +290,9 @@ public final class ActionExecutor {
                                       List<Map<String, Object>> navigationJournal) {
         String actionId = "act_" + UUID.randomUUID();
         Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        if (storage.capabilities().transactionalLineage()) {
+            transaction.mutationSource(org.openfoundry.foundation.spi.MutationSource.action(manifest.action(), actionId, now, false));
+        }
         var journal = new ArrayList<Map<String, Object>>();
         var navigation = new ActionNavigation(parameterSchema, context, actor, definition, parameters, authorizer, transaction,
                 () -> ActionEffectAccess.decode(journal), navigationJournal);
@@ -321,6 +324,13 @@ public final class ActionExecutor {
                 }
                 Map<String, Object> values = expressions.properties(update.set());
                 var updated = transaction.updateObject(target.type(), target.id(), values, target.version());
+                if (storage.capabilities().transactionalLineage()) {
+                    var provenance = transaction.latestLineage(target.key());
+                    var reasserted = values.keySet().stream().filter(field -> !provenance.containsKey(field)
+                            || provenance.get(field).entityVersion() != updated.version()
+                            || !provenance.get(field).transactionId().equals(transaction.transactionId())).collect(java.util.stream.Collectors.toSet());
+                    if (!reasserted.isEmpty()) transaction.recordProvenance(target.key(), updated.version(), reasserted);
+                }
                 journal.add(ActionContinuationState.undo("UPDATE_OBJECT", target.key(), updated.version(), target.properties()));
                 affected.add(target.key());
             } else if (effect instanceof ActionManifest.CreateObject create) {

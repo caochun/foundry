@@ -234,6 +234,54 @@ public final class ApplicationService {
         });
     }
 
+    public List<FieldProvenance> lineage(RequestContext context, SecurityPrincipal principal, EntityKey key, LineageQuery query) {
+        requireContext(context, principal);
+        return storage.read(context, () -> {
+            if (!properties.containsKey(key.type())) throw new IllegalArgumentException("Unknown lineage entity type");
+            var visible = visibleFields(principal, key.type());
+            if (query.field() != null && !visible.contains(query.field())) throw new SecurityException("Lineage field is not visible");
+            if (!canViewEntity(context, principal, key)) return List.of();
+            if (!canViewLineage(context, principal, key)) throw new SecurityException("Lineage access denied");
+            var result = new ArrayList<FieldProvenance>();
+            Long before = query.beforeSequence();
+            while (result.size() < query.limit()) {
+                var rows = storage.getLineage(context, key, new LineageQuery(query.field(), 100, before));
+                if (rows.isEmpty()) break;
+                for (var row : rows) {
+                    if (visible.contains(row.field())) result.add(publicLineage(row));
+                    if (result.size() == query.limit()) break;
+                }
+                before = rows.getLast().sequence();
+                if (rows.size() < 100) break;
+            }
+            if (!canViewEntity(context, principal, key)) return List.of();
+            if (!canViewLineage(context, principal, key)) throw new SecurityException("Lineage access denied");
+            return List.copyOf(result);
+        });
+    }
+
+    private boolean canViewLineage(RequestContext context, SecurityPrincipal principal, EntityKey key) {
+        if (relationTypes.contains(key.type()) && authorizationMode == AuthorizationMode.ONTOLOGY_TARGETS) {
+            var link = storage.getLink(context, key.type(), key.id());
+            return link != null && authorization.check(context, principal, "can_view_lineage", link.from())
+                    && authorization.check(context, principal, "can_view_lineage", link.to());
+        }
+        return authorization.check(context, principal, "can_view_lineage", key);
+    }
+
+    private static FieldProvenance publicLineage(FieldProvenance row) {
+        var details = new LinkedHashMap<String, Object>();
+        var allowed = switch (row.source().kind()) {
+            case ACTION -> Set.of("phase");
+            case SYNC -> Set.of("mappingVersion", "schemaBinding", "observedAt");
+            case DIRECT, FUNCTION -> Set.<String>of();
+        };
+        for (String field : allowed) if (row.source().details().containsKey(field)) details.put(field, row.source().details().get(field));
+        var source = new MutationSource(row.source().kind(), row.source().name(), row.source().operationId(), row.source().producedAt(), details);
+        return new FieldProvenance(row.tenantId(), row.entity(), row.field(), row.sequence(), row.entityVersion(), row.valuePresent(),
+                row.valueHash(), row.recordedAt(), row.transactionId(), row.actorId(), source);
+    }
+
     /** Resolve a declared relationship field. Pagination counts authorized rows, never hidden edges. */
     public Object readLinkField(RequestContext context, SecurityPrincipal principal, EntityKey source,
                                 String fieldName, QueryOptions options) {

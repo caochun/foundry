@@ -83,6 +83,10 @@ public final class JdkRestServer implements AutoCloseable {
             }
             response = router.objectSets(context.request(), context.principal(), exchange.getRequestMethod(), path,
                     parameters(exchange.getRequestURI().getRawQuery()), body);
+        } else if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && path.matches("/api/v1/[^/]+/[^/]+/lineage")) {
+            String[] parts = path.split("/");
+            response = router.lineage(context.request(), context.principal(), new org.openfoundry.foundation.spi.EntityKey(parts[3], parts[4]),
+                    parameters(exchange.getRequestURI().getRawQuery()));
         } else if ("GET".equalsIgnoreCase(exchange.getRequestMethod()) && exchange.getRequestURI().getPath().matches("/api/v1/[^/]+/search")) {
             String type = exchange.getRequestURI().getPath().split("/")[3];
             response = router.search(context.request(), context.principal(), type, SearchQuery.fromParameters(parameters(exchange.getRequestURI().getRawQuery())));

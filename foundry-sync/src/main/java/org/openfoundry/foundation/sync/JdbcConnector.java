@@ -28,6 +28,14 @@ public final class JdbcConnector implements Connector {
     @Override
     public String name() { return name; }
 
+    private static Object wireValue(Object value) {
+        if (value instanceof java.sql.Timestamp timestamp) return timestamp.toInstant().toString();
+        if (value instanceof java.sql.Date date) return date.toLocalDate().toString();
+        if (value instanceof java.sql.Time time) return time.toLocalTime().toString();
+        if (value instanceof java.time.temporal.TemporalAccessor || value instanceof java.util.UUID) return value.toString();
+        return value;
+    }
+
     @Override
     public Stream<SourceRecord> read(SourceQuery query) {
         try (Connection connection = dataSource.getConnection();
@@ -37,12 +45,12 @@ public final class JdbcConnector implements Connector {
             ResultSetMetaData metadata = result.getMetaData();
             while (result.next()) {
                 Map<String, Object> data = new LinkedHashMap<>();
-                for (int i = 1; i <= metadata.getColumnCount(); i++) data.put(metadata.getColumnLabel(i), result.getObject(i));
+                for (int i = 1; i <= metadata.getColumnCount(); i++) data.put(metadata.getColumnLabel(i), wireValue(result.getObject(i)));
                 Object sourceId = data.values().stream().findFirst().orElse(null);
                 if (sourceId == null) throw new IllegalStateException("JDBC source row has no first-column identity");
                 Instant observed = Instant.now();
-                records.add(new SourceRecord(sourceSystem, String.valueOf(sourceId), "UPSERT", observed, data,
-                        new Provenance(sourceSystem, String.valueOf(sourceId), null, "jdbc", observed, name, null)));
+                records.add(new SourceRecord(sourceSystem, RecordMapper.canonicalId(sourceId), "UPSERT", observed, data,
+                        new Provenance(sourceSystem, RecordMapper.canonicalId(sourceId), null, "jdbc", observed, name, null)));
             }
             return records.stream();
         } catch (Exception exception) {

@@ -34,6 +34,15 @@ class SyncContractsTest {
     }
 
     @Test
+    void explicitlyRankedSourcesStillPrecedeUnknownSourcesAtMaximumRank() {
+        var resolver = new ConflictResolver(ConflictResolver.Strategy.SOURCE_PRIORITY, Map.of(), Map.of("known", Integer.MAX_VALUE));
+        var time = Instant.parse("2030-01-01T00:00:00Z");
+        var result = resolver.resolve(Map.of("name", new ConflictResolver.IncomingValue("Known", "known", time, false)),
+                Map.of("name", new ConflictResolver.ExistingValue("Unknown", "unlisted", time.plusSeconds(1), false)));
+        assertEquals("Known", result.accepted().get("name"));
+    }
+
+    @Test
     void materializesSourceRecordsThroughStorageTransactions() {
         InMemoryStorageProvider storage = new InMemoryStorageProvider();
         RequestContext context = RequestContext.system("tenant", "sync");
@@ -50,12 +59,12 @@ class SyncContractsTest {
             public String name() { return "test"; }
             public Stream<SourceRecord> read(SourceQuery query) { return Stream.of(source); }
         };
-        var result = new MaterializedSyncService(storage).sync(connector,
+        var result = new MaterializedSyncService(storage).withAuthorization((ctx, connectorName, config, target, tx) -> true).sync(connector,
                 new SourceQuery("people", Map.of()),
                 new MappingConfig("Person", "id", Map.of("id", "id", "name", "name")), context);
         assertEquals(1, result.created());
         assertEquals("Alice", storage.getObject(context, "Person", "p-1").properties().get("name"));
-        var replay = new MaterializedSyncService(storage).sync(connector, new SourceQuery("people", Map.of()),
+        var replay = new MaterializedSyncService(storage).withAuthorization((ctx, connectorName, config, target, tx) -> true).sync(connector, new SourceQuery("people", Map.of()),
                 new MappingConfig("Person", "id", Map.of("id", "id", "name", "name")), context);
         assertTrue(replay.failures().isEmpty());
         assertEquals(0, replay.updated());

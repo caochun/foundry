@@ -23,7 +23,7 @@ public final class RestConnector implements Connector {
     private final ObjectMapper mapper;
 
     public RestConnector(String name, String sourceSystem) {
-        this(name, sourceSystem, HttpClient.newHttpClient(), new ObjectMapper());
+        this(name, sourceSystem, HttpClient.newHttpClient(), exactMapper());
     }
 
     RestConnector(String name, String sourceSystem, HttpClient client, ObjectMapper mapper) {
@@ -31,6 +31,17 @@ public final class RestConnector implements Connector {
         this.sourceSystem = sourceSystem;
         this.client = client;
         this.mapper = mapper;
+    }
+
+    private static ObjectMapper exactMapper() {
+        var module = new com.fasterxml.jackson.databind.module.SimpleModule();
+        module.addDeserializer(Number.class, new com.fasterxml.jackson.databind.JsonDeserializer<Number>() {
+            @Override public Number deserialize(com.fasterxml.jackson.core.JsonParser parser, com.fasterxml.jackson.databind.DeserializationContext context) throws java.io.IOException {
+                return parser.currentToken() == com.fasterxml.jackson.core.JsonToken.VALUE_NUMBER_INT ? parser.getNumberValue()
+                        : org.openfoundry.foundation.spi.schema.PropertyValues.jsonDecimal(parser.getDecimalValue());
+            }
+        });
+        return new ObjectMapper().registerModule(module);
     }
 
     @Override
@@ -47,7 +58,7 @@ public final class RestConnector implements Connector {
             return rows.stream().map(row -> {
                 Object id = row.getOrDefault("id", row.get("_id"));
                 if (id == null) throw new IllegalStateException("REST row has no id field");
-                String sourceId = String.valueOf(id);
+                String sourceId = RecordMapper.canonicalId(id);
                 return new SourceRecord(sourceSystem, sourceId, "UPSERT", observed,
                         row, new Provenance(sourceSystem, sourceId, null, "rest", observed, name, null));
             });

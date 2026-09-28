@@ -16,6 +16,12 @@ import org.openfoundry.foundation.spi.StorageCapabilities;
 import org.openfoundry.foundation.spi.StorageProvider;
 import org.openfoundry.foundation.spi.Transaction;
 import org.openfoundry.foundation.spi.TemporalHistory;
+import org.openfoundry.foundation.spi.MutationSource;
+import org.openfoundry.foundation.spi.FieldProvenance;
+import org.openfoundry.foundation.spi.LineageQuery;
+import org.openfoundry.foundation.spi.LineageValues;
+import org.openfoundry.foundation.spi.IngestionReceipt;
+import org.openfoundry.foundation.spi.IngestionCheckpoint;
 import java.time.Clock;
 import org.openfoundry.foundation.spi.schema.PropertyValues;
 import org.openfoundry.foundation.spi.schema.UniquePropertyIndex;
@@ -47,13 +53,14 @@ import java.util.UUID;
 public final class JdbcStorageProvider implements StorageProvider, AutoCloseable {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
     private static final StorageCapabilities CAPABILITIES = new StorageCapabilities(
-            true, true, false, false, false, true, false, true);
+            true, true, false, false, false, true, false, true, true, true);
 
     private final DataSource dataSource;
     private final Clock clock;
     private final org.openfoundry.foundation.validation.PropertyValidator propertyValidator = new org.openfoundry.foundation.validation.PropertyValidator();
     private final DatabaseDialect dialect;
     private final ObjectMapper objectMapper;
+    private final JdbcLineage lineage;
     private final Object schemaLock = new Object();
     private boolean tablesInitialized;
     private volatile JdbcSchemaActivation.Binding binding;
@@ -68,6 +75,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource must not be null");
         this.dialect = Objects.requireNonNull(dialect, "dialect must not be null");
         this.objectMapper = new ObjectMapper().registerModule(JsonNumbers.module());
+        this.lineage = new JdbcLineage(dialect, objectMapper);
         this.activation = new JdbcSchemaActivation(dataSource, dialect, clock);
     }
 
@@ -321,6 +329,34 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 }
             } catch (SQLException failure) { throw sqlError("temporal traversal", failure); }
         });
+    }
+
+    @Override
+    public List<FieldProvenance> getLineage(RequestContext context, EntityKey key, LineageQuery query) {
+        return schemaRead(context, () -> {
+            try (var connection = dataSource.getConnection()) { return lineage.query(connection, context, key, query); }
+            catch (SQLException failure) { throw sqlError("read field lineage", failure); }
+        });
+    }
+
+    @Override
+    public IngestionCheckpoint getIngestionCheckpoint(RequestContext context, String key) {
+        IngestionReceipt.requireHash(key);
+        return schemaRead(context, () -> {
+            try (var connection = dataSource.getConnection()) { return readIngestionCheckpoint(connection, context, key); }
+            catch (SQLException failure) { throw sqlError("read ingestion checkpoint", failure); }
+        });
+    }
+
+    private IngestionCheckpoint readIngestionCheckpoint(Connection connection, RequestContext context, String key) throws SQLException {
+        try (var statement = connection.prepareStatement("SELECT * FROM of_ingestion_checkpoints WHERE tenant_id = ? AND checkpoint_key = ?")) {
+            statement.setString(1, context.tenantId());
+            statement.setString(2, key);
+            try (var row = statement.executeQuery()) {
+                return row.next() ? new IngestionCheckpoint(key, row.getLong("version"), row.getLong("source_sequence"),
+                        jsonMap(row.getString("token_json")).get("value"), row.getString("source_system"), row.getString("configuration_hash")) : null;
+            }
+        }
     }
 
     @Override
@@ -620,6 +656,8 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         private final Connection connection;
         private final String transactionId = UUID.randomUUID().toString();
         private boolean closed;
+        private MutationSource source;
+        private boolean sourceFrozen;
         private boolean writeLocked;
         private boolean rollbackOnly;
         private final JdbcSchemaActivation.Binding transactionBinding;
@@ -656,6 +694,123 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         }
 
         @Override public RequestContext context() { return context; }
+
+        @Override
+        public void mutationSource(MutationSource source) {
+            assertOpen();
+            if (sourceFrozen) throw new IllegalStateException("Mutation source cannot change after fact or provenance writes");
+            this.source = Objects.requireNonNull(source);
+        }
+
+        @Override
+        public Map<String, FieldProvenance> latestLineage(EntityKey key) {
+            assertOpen();
+            try { return lineage.latest(connection, context, key); }
+            catch (SQLException failure) { throw sqlError("read transactional lineage", failure); }
+        }
+
+        @Override
+        public void recordProvenance(EntityKey key, long expectedVersion, java.util.Set<String> fields) {
+            assertOpen();
+            lockWrites();
+            boolean relationship = schema.linkTypes().stream().anyMatch(type -> type.name().equals(key.type()));
+            var definitions = relationship ? requireLinkType(key.type()).properties() : objectProperties(key.type());
+            var declared = definitions.stream().filter(field -> !field.primary()).map(org.openfoundry.foundation.spi.schema.PropertyDefinition::name).collect(java.util.stream.Collectors.toSet());
+            declared.add("_entity");
+            if (!declared.containsAll(fields)) throw new IllegalArgumentException("Unknown or primary provenance field");
+            Map<String, Object> current;
+            boolean alive;
+            long actualVersion;
+            if (relationship) {
+                var link = findLink(key.type(), key.id());
+                actualVersion = link == null ? 0 : link.version();
+                alive = link != null && !link.isDeleted();
+                current = link == null ? Map.of() : link.properties();
+            } else {
+                var object = findObject(key.type(), key.id());
+                actualVersion = object == null ? 0 : object.version();
+                alive = object != null && !object.isDeleted();
+                current = object == null ? Map.of() : object.properties();
+            }
+            assertVersion(actualVersion, expectedVersion);
+            if (actualVersion == 0 && !fields.equals(java.util.Set.of("_entity"))) throw new IllegalArgumentException("Only absent identity observations are allowed before creation");
+            var values = new java.util.TreeMap<String, LineageValues.Value>();
+            for (String field : fields) {
+                boolean present = alive && (field.equals("_entity") || current.containsKey(field));
+                Object value = field.equals("_entity") ? true : current.get(field);
+                values.put(field, new LineageValues.Value(present, LineageValues.hash(present, value)));
+            }
+            if (values.isEmpty()) return;
+            var now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+            freezeSource(now);
+            try { lineage.append(connection, context, key, expectedVersion, transactionId, values, source, now); }
+            catch (SQLException failure) { throw sqlError("record provenance observation", failure); }
+            catch (RuntimeException | Error failure) { rollbackOnly = true; throw failure; }
+        }
+
+        @Override
+        public IngestionReceipt getIngestionReceipt(String key) {
+            assertOpen();
+            IngestionReceipt.requireHash(key);
+            try (var statement = connection.prepareStatement("SELECT * FROM of_ingestion_receipts WHERE tenant_id = ? AND receipt_key = ?")) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, key);
+                try (var row = statement.executeQuery()) {
+                    return row.next() ? new IngestionReceipt(key, row.getString("request_hash"), new EntityKey(row.getString("target_type"), row.getString("target_id")), jsonMap(row.getString("result_json"))) : null;
+                }
+            } catch (SQLException failure) { throw sqlError("read ingestion receipt", failure); }
+        }
+
+        @Override
+        public void putIngestionReceipt(IngestionReceipt receipt) {
+            assertOpen();
+            lockWrites();
+            try (var statement = connection.prepareStatement("INSERT INTO of_ingestion_receipts (tenant_id, receipt_key, request_hash, target_type, target_id, actor_id, result_json) VALUES (?, ?, ?, ?, ?, ?, ?)")) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, receipt.key());
+                statement.setString(3, receipt.requestHash());
+                statement.setString(4, receipt.target().type());
+                statement.setString(5, receipt.target().id());
+                statement.setString(6, context.actorId());
+                statement.setString(7, json(receipt.result()));
+                statement.executeUpdate();
+            } catch (SQLException failure) { throw sqlError("write ingestion receipt", failure); }
+        }
+
+        @Override
+        public IngestionCheckpoint getIngestionCheckpoint(String key) {
+            assertOpen();
+            IngestionReceipt.requireHash(key);
+            try { return readIngestionCheckpoint(connection, context, key); }
+            catch (SQLException failure) { throw sqlError("read transactional ingestion checkpoint", failure); }
+        }
+
+        @Override
+        public void putIngestionCheckpoint(IngestionCheckpoint checkpoint, long expectedVersion) {
+            assertOpen();
+            lockWrites();
+            checkpoint.requireSuccessor(getIngestionCheckpoint(checkpoint.key()), expectedVersion);
+            String sql = expectedVersion == 0
+                    ? "INSERT INTO of_ingestion_checkpoints (version, source_sequence, token_json, source_system, configuration_hash, tenant_id, checkpoint_key) VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    : "UPDATE of_ingestion_checkpoints SET version = ?, source_sequence = ?, token_json = ?, source_system = ?, configuration_hash = ? WHERE tenant_id = ? AND checkpoint_key = ? AND version = ?";
+            try (var statement = connection.prepareStatement(sql)) {
+                statement.setLong(1, checkpoint.version());
+                statement.setLong(2, checkpoint.sequence());
+                statement.setString(3, json(Map.of("value", checkpoint.token())));
+                statement.setString(4, checkpoint.sourceSystem());
+                statement.setString(5, checkpoint.configuration());
+                statement.setString(6, context.tenantId());
+                statement.setString(7, checkpoint.key());
+                if (expectedVersion != 0) statement.setLong(8, expectedVersion);
+                if (statement.executeUpdate() != 1) throw new org.openfoundry.foundation.spi.TransactionConflictException("Ingestion checkpoint version changed");
+            } catch (SQLException failure) { throw sqlError("write ingestion checkpoint", failure); }
+        }
+
+        private void freezeSource(Instant now) {
+            if (source == null) source = MutationSource.direct(transactionId, now);
+            sourceFrozen = true;
+        }
+
         @Override public DataSource transactionDataSource() { return dataSource; }
         @Override public Connection transactionConnection() { assertOpen(); return connection; }
 
@@ -685,7 +840,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setString(1, context.tenantId()); statement.setString(2, type); statement.setString(3, id);
                 statement.setTimestamp(4, timestamp(now)); statement.setTimestamp(5, timestamp(now));
                 statement.setString(6, transactionId); statement.setString(7, json(properties)); statement.executeUpdate();
-                insertObjectHistory(type, id, 1, EntityOperation.CREATED, effective, null, now, properties);
+                insertObjectHistory(type, id, 1, EntityOperation.CREATED, effective, null, now, properties, null);
                 uniqueProperties.applied(schema, "object", type, objectProperties(type), id, null, properties);
                 return findObject(type, id);
             } catch (SQLException exception) { throw sqlError("create object", exception); }
@@ -698,21 +853,26 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
         @Override
         public ObjectRecord updateObject(String type, String id, Map<String, Object> properties, long expectedVersion, Instant effectiveAt) {
-            return writeObjectProperties(type, id, properties, expectedVersion, effectiveAt, false);
+            return writeObjectProperties(type, id, properties, expectedVersion, effectiveAt, false, false);
         }
 
         @Override
         public ObjectRecord restoreObjectProperties(String type, String id, Map<String, Object> properties, long expectedVersion) {
-            return writeObjectProperties(type, id, properties, expectedVersion, null, true);
+            return writeObjectProperties(type, id, properties, expectedVersion, null, true, false);
+        }
+
+        @Override
+        public ObjectRecord restoreObject(String type, String id, Map<String, Object> properties, long expectedVersion) {
+            return writeObjectProperties(type, id, properties, expectedVersion, null, false, true);
         }
 
         private ObjectRecord writeObjectProperties(String type, String id, Map<String, Object> properties,
-                                                    long expectedVersion, Instant effectiveAt, boolean replace) {
+                                                    long expectedVersion, Instant effectiveAt, boolean replace, boolean restoring) {
             assertOpen();
             lockWrites();
             ObjectRecord existing = requireObject(findObject(type, id), type, id);
             assertVersion(existing.version(), expectedVersion);
-            if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
+            if (existing.isDeleted() != restoring) throw new IllegalStateException(restoring ? "Entity is already active" : "Entity is already deleted");
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             Map<String, Object> merged = replace
                     ? propertyValidator.restore(schema, objectProperties(type), objectConstraints(type), id, properties, existing.properties(), context, now)
@@ -720,15 +880,15 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
             uniqueProperties.check(schema, "object", type, objectProperties(type), id, merged, () -> currentProperties(false, type));
             Instant effective = effectiveTime(false, type, id, effectiveAt, now);
             long version = existing.version() + 1;
-            String sql = "UPDATE of_objects SET version = ?, updated_at = ?, last_transaction_id = ?, properties_json = ? "
-                    + "WHERE tenant_id = ? AND object_type = ? AND object_id = ? AND version = ?";
+            String sql = "UPDATE of_objects SET version = ?, updated_at = ?, last_transaction_id = ?, properties_json = ?"
+                    + (restoring ? ", deleted_at = NULL" : "") + " WHERE tenant_id = ? AND object_type = ? AND object_id = ? AND version = ?";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setLong(1, version); statement.setTimestamp(2, timestamp(now)); statement.setString(3, transactionId);
                 statement.setString(4, json(merged)); statement.setString(5, context.tenantId()); statement.setString(6, type);
                 statement.setString(7, id); statement.setLong(8, expectedVersion);
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during object update");
-                insertObjectHistory(type, id, version, EntityOperation.UPDATED, effective, null, now, merged);
-                uniqueProperties.applied(schema, "object", type, objectProperties(type), id, existing.properties(), merged);
+                insertObjectHistory(type, id, version, restoring ? EntityOperation.RESTORED : EntityOperation.UPDATED, effective, null, now, merged, existing.properties());
+                uniqueProperties.applied(schema, "object", type, objectProperties(type), id, restoring ? null : existing.properties(), merged);
                 return findObject(type, id);
             } catch (SQLException exception) { throw sqlError("update object", exception); }
         }
@@ -755,7 +915,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setString(4, transactionId); statement.setString(5, context.tenantId()); statement.setString(6, type);
                 statement.setString(7, id); statement.setLong(8, expectedVersion);
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during object delete");
-                insertObjectHistory(type, id, version, EntityOperation.DELETED, effective, null, now, existing.properties());
+                insertObjectHistory(type, id, version, EntityOperation.DELETED, effective, null, now, existing.properties(), existing.properties());
                 uniqueProperties.applied(schema, "object", type, objectProperties(type), id, existing.properties(), null);
             } catch (SQLException exception) { throw sqlError("delete object", exception); }
         }
@@ -790,7 +950,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setString(4, from.type()); statement.setString(5, from.id()); statement.setString(6, to.type()); statement.setString(7, to.id());
                 statement.setTimestamp(8, timestamp(now)); statement.setTimestamp(9, timestamp(now)); statement.setTimestamp(10, timestamp(effective));
                 statement.setString(11, transactionId); statement.setString(12, json(properties)); statement.executeUpdate();
-                insertLinkHistory(type, id, from, to, 1, EntityOperation.CREATED, effective, null, now, properties);
+                insertLinkHistory(type, id, from, to, 1, EntityOperation.CREATED, effective, null, now, properties, null);
                 uniqueProperties.applied(schema, "link", type, requireLinkType(type).properties(), id, null, properties);
                 return findLink(type, id);
             } catch (SQLException exception) { throw sqlError("create link", exception); }
@@ -820,7 +980,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setString(4, json(merged)); statement.setString(5, context.tenantId()); statement.setString(6, type); statement.setString(7, id); statement.setLong(8, expectedVersion);
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during link update");
                 insertLinkHistory(type, id, existing.from(), existing.to(), version, EntityOperation.UPDATED,
-                        effective, null, now, merged);
+                        effective, null, now, merged, existing.properties());
                 uniqueProperties.applied(schema, "link", type, requireLinkType(type).properties(), id, existing.properties(), merged);
                 return findLink(type, id);
             } catch (SQLException exception) { throw sqlError("update link", exception); }
@@ -847,7 +1007,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setString(6, context.tenantId()); statement.setString(7, type); statement.setString(8, id); statement.setLong(9, expectedVersion);
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during link delete");
                 insertLinkHistory(type, id, existing.from(), existing.to(), version, EntityOperation.DELETED,
-                        effective, null, now, existing.properties());
+                        effective, null, now, existing.properties(), existing.properties());
                 uniqueProperties.applied(schema, "link", type, requireLinkType(type).properties(), id, existing.properties(), null);
             } catch (SQLException exception) { throw sqlError("delete link", exception); }
         }
@@ -884,7 +1044,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                 statement.setLong(9, expectedVersion);
                 if (statement.executeUpdate() != 1) throw new IllegalStateException("version conflict during relationship restore");
                 insertLinkHistory(type, id, existing.from(), existing.to(), existing.version() + 1, EntityOperation.RESTORED,
-                        effective, null, now, properties);
+                        effective, null, now, properties, null);
                 uniqueProperties.applied(schema, "link", type, definition.properties(), id, null, properties);
                 return findLink(type, id);
             } catch (SQLException failure) {
@@ -1223,20 +1383,55 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         }
 
         private void insertObjectHistory(String type, String id, long version, EntityOperation operation,
-                                         Instant validFrom, Instant validTo, Instant recordedAt, Map<String, Object> state) throws SQLException {
+                                         Instant validFrom, Instant validTo, Instant recordedAt, Map<String, Object> state, Map<String, Object> previous) throws SQLException {
             String sql = "INSERT INTO of_object_history (tenant_id, object_type, object_id, version, operation, valid_from, valid_to, recorded_at, transaction_id, action_id, actor_id, source_system, state_json, temporal_format) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, 2)";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, context.tenantId()); statement.setString(2, type); statement.setString(3, id); statement.setLong(4, version); statement.setString(5, operation.name());
                 statement.setTimestamp(6, timestamp(validFrom)); setNullableTimestamp(statement, 7, validTo); statement.setTimestamp(8, timestamp(recordedAt)); statement.setString(9, transactionId); statement.setString(10, context.actorId()); statement.setString(11, json(state)); statement.executeUpdate();
             }
+            recordFactSource(false, type, id, version, operation, previous, state, recordedAt);
         }
 
         private void insertLinkHistory(String type, String id, EntityKey from, EntityKey to, long version, EntityOperation operation,
-                                       Instant validFrom, Instant validTo, Instant recordedAt, Map<String, Object> state) throws SQLException {
+                                       Instant validFrom, Instant validTo, Instant recordedAt, Map<String, Object> state, Map<String, Object> previous) throws SQLException {
             String sql = "INSERT INTO of_link_history (tenant_id, link_type, link_id, from_type, from_id, to_type, to_id, version, operation, valid_from, valid_to, recorded_at, transaction_id, action_id, actor_id, source_system, state_json, temporal_format) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, 2)";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, context.tenantId()); statement.setString(2, type); statement.setString(3, id); statement.setString(4, from.type()); statement.setString(5, from.id()); statement.setString(6, to.type()); statement.setString(7, to.id()); statement.setLong(8, version); statement.setString(9, operation.name());
                 statement.setTimestamp(10, timestamp(validFrom)); setNullableTimestamp(statement, 11, validTo); statement.setTimestamp(12, timestamp(recordedAt)); statement.setString(13, transactionId); statement.setString(14, context.actorId()); statement.setString(15, json(state)); statement.executeUpdate();
+            }
+            recordFactSource(true, type, id, version, operation, previous, state, recordedAt);
+        }
+
+        private void recordFactSource(boolean relationship, String type, String id, long version, EntityOperation operation,
+                                      Map<String, Object> previous, Map<String, Object> current, Instant now) throws SQLException {
+            try {
+                freezeSource(now);
+                String prefix = relationship ? "link" : "object";
+                try (var statement = connection.prepareStatement("UPDATE of_" + prefix + "_history SET action_id = ?, source_system = ?"
+                        + " WHERE tenant_id = ? AND " + prefix + "_type = ? AND " + prefix + "_id = ? AND version = ?")) {
+                    statement.setString(1, source.actionId());
+                    statement.setString(2, source.sourceSystem());
+                    statement.setString(3, context.tenantId());
+                    statement.setString(4, type);
+                    statement.setString(5, id);
+                    statement.setLong(6, version);
+                    if (statement.executeUpdate() != 1) throw new SQLException("Fact source history row is missing");
+                }
+                try (var statement = connection.prepareStatement("UPDATE of_" + (relationship ? "links" : "objects") + " SET last_action_id = ?"
+                        + " WHERE tenant_id = ? AND " + prefix + "_type = ? AND " + prefix + "_id = ? AND version = ?")) {
+                    statement.setString(1, source.actionId());
+                    statement.setString(2, context.tenantId());
+                    statement.setString(3, type);
+                    statement.setString(4, id);
+                    statement.setLong(5, version);
+                    if (statement.executeUpdate() != 1) throw new SQLException("Fact source current row is missing");
+                }
+                var definitions = relationship ? requireLinkType(type).properties() : objectProperties(type);
+                lineage.append(connection, context, new EntityKey(type, id), version, transactionId,
+                        LineageValues.changes(definitions, previous, current, operation), source, now);
+            } catch (RuntimeException | Error failure) {
+                rollbackOnly = true;
+                throw failure;
             }
         }
 

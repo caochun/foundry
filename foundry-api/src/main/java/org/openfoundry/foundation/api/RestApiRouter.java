@@ -22,6 +22,17 @@ public final class RestApiRouter {
         this.objectSets = objectSets == null ? null : new ObjectSetService(application, objectSets);
     }
 
+    public ApiResponse lineage(RequestContext context, SecurityPrincipal principal, EntityKey key, Map<String, String> parameters) {
+        try {
+            requireParameters(parameters, java.util.Set.of("field", "limit", "before"));
+            int limit = parameters.containsKey("limit") ? Integer.parseInt(parameters.get("limit")) : 100;
+            Long before = parameters.containsKey("before") ? Long.valueOf(parameters.get("before")) : null;
+            return ApiResponse.ok(application.lineage(context, principal, key,
+                    new org.openfoundry.foundation.spi.LineageQuery(parameters.get("field"), limit, before)));
+        } catch (SecurityException denied) { return ApiResponse.forbidden(); }
+        catch (IllegalArgumentException invalid) { return ApiResponse.badRequest("Invalid lineage query"); }
+    }
+
     public ApiResponse consent(RequestContext context, SecurityPrincipal principal, String method, String path,
                                Map<String, String> parameters, Map<String, Object> input) {
         var api = new ConsentApi(application);
@@ -124,6 +135,9 @@ public final class RestApiRouter {
             var value = application.readObject(context, principal, type, parts[4]);
             if (value == null) return ApiResponse.notFound();
             return ApiResponse.ok(value.consentRestricted() ? Map.of("id", value.key().id(), "_consentRestricted", true) : value.object());
+        }
+        if (parts.length == 6 && "lineage".equals(parts[5])) {
+            return lineage(context, principal, new EntityKey(type, parts[4]), Map.of());
         }
         if (parts.length == 6 && "history".equals(parts[5])) {
             return ApiResponse.ok(application.history(context, principal, new EntityKey(type, parts[4])));

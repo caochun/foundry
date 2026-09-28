@@ -37,6 +37,14 @@ public interface StorageProvider {
 
     List<HistorySnapshot> getEntityHistory(RequestContext context, EntityKey key);
 
+    default List<FieldProvenance> getLineage(RequestContext context, EntityKey key, LineageQuery query) {
+        throw new UnsupportedOperationException("Field lineage is not supported");
+    }
+
+    default IngestionCheckpoint getIngestionCheckpoint(RequestContext context, String key) {
+        throw new UnsupportedOperationException("Ingestion checkpoints are not supported");
+    }
+
     Transaction beginTransaction(RequestContext context);
 
     /** Local immutable binding, or null before schema initialization. */

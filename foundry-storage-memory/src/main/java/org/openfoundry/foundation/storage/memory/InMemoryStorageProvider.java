@@ -13,6 +13,12 @@ import org.openfoundry.foundation.spi.StorageCapabilities;
 import org.openfoundry.foundation.spi.StorageProvider;
 import org.openfoundry.foundation.spi.Transaction;
 import org.openfoundry.foundation.spi.TemporalHistory;
+import org.openfoundry.foundation.spi.MutationSource;
+import org.openfoundry.foundation.spi.FieldProvenance;
+import org.openfoundry.foundation.spi.LineageQuery;
+import org.openfoundry.foundation.spi.LineageValues;
+import org.openfoundry.foundation.spi.IngestionReceipt;
+import org.openfoundry.foundation.spi.IngestionCheckpoint;
 import java.time.Clock;
 import org.openfoundry.foundation.spi.schema.PropertyValues;
 import org.openfoundry.foundation.spi.schema.UniquePropertyIndex;
@@ -41,7 +47,7 @@ import java.util.UUID;
  */
 public final class InMemoryStorageProvider implements StorageProvider {
     private static final StorageCapabilities CAPABILITIES = new StorageCapabilities(
-            true, true, false, false, false, true, false, true);
+            true, true, false, false, false, true, false, true, true, true);
 
     private final Object monitor = new Object();
     private final Clock clock;
@@ -207,6 +213,19 @@ public final class InMemoryStorageProvider implements StorageProvider {
         return findHistory(context, key);
     }
 
+    @Override
+    public List<FieldProvenance> getLineage(RequestContext context, EntityKey key, LineageQuery query) {
+        synchronized (monitor) {
+            return LineageValues.select(state.lineage.getOrDefault(historyKey(context, key), List.of()), query);
+        }
+    }
+
+    @Override
+    public IngestionCheckpoint getIngestionCheckpoint(RequestContext context, String key) {
+        IngestionReceipt.requireHash(key);
+        synchronized (monitor) { return state.checkpoints.get(objectKey(context, "__ingestion", key)); }
+    }
+
     public List<AuditEntry> auditEntries(RequestContext context) {
         synchronized (monitor) {
             return state.audits.stream().filter(entry -> entry.tenantId().equals(context.tenantId())).toList();
@@ -290,6 +309,9 @@ public final class InMemoryStorageProvider implements StorageProvider {
         private State working;
         private final String transactionId = UUID.randomUUID().toString();
         private boolean closed;
+        private boolean rollbackOnly;
+        private MutationSource source;
+        private boolean sourceFrozen;
         private final UniquePropertyIndex uniqueProperties = new UniquePropertyIndex();
         private final Map<Object, org.openfoundry.foundation.spi.TransactionResource> resources = new LinkedHashMap<>();
         private final OntologySchema schema = InMemoryStorageProvider.this.schema;
@@ -328,6 +350,84 @@ public final class InMemoryStorageProvider implements StorageProvider {
         }
 
         @Override public RequestContext context() { return context; }
+
+        @Override
+        public void mutationSource(MutationSource source) {
+            assertOpen();
+            if (sourceFrozen) throw new IllegalStateException("Mutation source cannot change after fact or provenance writes");
+            this.source = Objects.requireNonNull(source);
+        }
+
+        @Override
+        public Map<String, FieldProvenance> latestLineage(EntityKey key) {
+            assertOpen();
+            return LineageValues.latest(working.lineage.getOrDefault(historyKey(context, key), List.of()));
+        }
+
+        @Override
+        public void recordProvenance(EntityKey key, long expectedVersion, java.util.Set<String> fields) {
+            assertOpen();
+            boolean relationship = schema.linkTypes().stream().anyMatch(type -> type.name().equals(key.type()));
+            var definitions = relationship ? requireLinkType(key.type()).properties() : objectProperties(key.type());
+            var declared = definitions.stream().filter(field -> !field.primary()).map(org.openfoundry.foundation.spi.schema.PropertyDefinition::name).collect(java.util.stream.Collectors.toSet());
+            declared.add("_entity");
+            if (!declared.containsAll(fields)) throw new IllegalArgumentException("Unknown or primary provenance field");
+            Map<String, Object> current;
+            boolean alive;
+            long actualVersion;
+            if (relationship) {
+                var link = working.links.get(linkKey(context, key.type(), key.id()));
+                actualVersion = link == null ? 0 : link.version();
+                alive = link != null && !link.isDeleted();
+                current = link == null ? Map.of() : link.properties();
+            } else {
+                var object = working.objects.get(objectKey(context, key.type(), key.id()));
+                actualVersion = object == null ? 0 : object.version();
+                alive = object != null && !object.isDeleted();
+                current = object == null ? Map.of() : object.properties();
+            }
+            assertVersion(actualVersion, expectedVersion);
+            if (actualVersion == 0 && !fields.equals(java.util.Set.of("_entity"))) throw new IllegalArgumentException("Only absent identity observations are allowed before creation");
+            var values = new java.util.TreeMap<String, LineageValues.Value>();
+            for (String field : fields) {
+                boolean present = alive && (field.equals("_entity") || current.containsKey(field));
+                Object value = field.equals("_entity") ? true : current.get(field);
+                values.put(field, new LineageValues.Value(present, LineageValues.hash(present, value)));
+            }
+            appendLineage(key, expectedVersion, values, clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS));
+        }
+
+        @Override
+        public IngestionReceipt getIngestionReceipt(String key) {
+            assertOpen();
+            IngestionReceipt.requireHash(key);
+            return working.ingestionReceipts.get(objectKey(context, "__ingestion", key));
+        }
+
+        @Override
+        public void putIngestionReceipt(IngestionReceipt receipt) {
+            assertOpen();
+            if (working.ingestionReceipts.putIfAbsent(objectKey(context, "__ingestion", receipt.key()), receipt) != null) {
+                throw new IllegalStateException("Source event receipt already exists");
+            }
+        }
+
+        @Override
+        public IngestionCheckpoint getIngestionCheckpoint(String key) {
+            assertOpen();
+            IngestionReceipt.requireHash(key);
+            return working.checkpoints.get(objectKey(context, "__ingestion", key));
+        }
+
+        @Override
+        public void putIngestionCheckpoint(IngestionCheckpoint checkpoint, long expectedVersion) {
+            assertOpen();
+            checkpoint.requireSuccessor(getIngestionCheckpoint(checkpoint.key()), expectedVersion);
+            working.checkpoints.put(objectKey(context, "__ingestion", checkpoint.key()), checkpoint);
+        }
+
+        private String sourceActionId() { return source == null ? null : source.actionId(); }
+
         @Override public org.openfoundry.foundation.spi.TransactionResource resource(Object key) { return resources.get(key); }
         @Override @SuppressWarnings("unchecked")
         public <T extends org.openfoundry.foundation.spi.TransactionResource> T enlist(Object key, java.util.function.Supplier<T> factory) {
@@ -358,7 +458,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
             uniqueProperties.check(schema, "object", type, objectProperties(type), id, properties, () -> currentProperties(false, type));
             Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             ObjectRecord object = new ObjectRecord(context.tenantId(), type, id, 1,
-                    now, now, null, transactionId, null, properties);
+                    now, now, null, transactionId, sourceActionId(), properties);
             working.objects.put(key, object);
             appendHistory(new EntityKey(type, id), 1, EntityOperation.CREATED,
                     effective, null, now, properties);
@@ -375,22 +475,27 @@ public final class InMemoryStorageProvider implements StorageProvider {
         @Override
         public ObjectRecord updateObject(String type, String id, Map<String, Object> properties,
                                          long expectedVersion, Instant effectiveAt) {
-            return writeObjectProperties(type, id, properties, expectedVersion, effectiveAt, false);
+            return writeObjectProperties(type, id, properties, expectedVersion, effectiveAt, false, false);
         }
 
         @Override
         public ObjectRecord restoreObjectProperties(String type, String id, Map<String, Object> properties, long expectedVersion) {
-            return writeObjectProperties(type, id, properties, expectedVersion, null, true);
+            return writeObjectProperties(type, id, properties, expectedVersion, null, true, false);
+        }
+
+        @Override
+        public ObjectRecord restoreObject(String type, String id, Map<String, Object> properties, long expectedVersion) {
+            return writeObjectProperties(type, id, properties, expectedVersion, null, false, true);
         }
 
         private ObjectRecord writeObjectProperties(String type, String id, Map<String, Object> properties,
-                                                    long expectedVersion, Instant effectiveAt, boolean replace) {
+                                                    long expectedVersion, Instant effectiveAt, boolean replace, boolean restoring) {
             assertOpen();
             requireObjectType(type);
             String key = objectKey(context, type, id);
             ObjectRecord existing = requireObject(working.objects.get(key), type, id);
             assertVersion(existing.version(), expectedVersion);
-            if (existing.isDeleted()) throw new IllegalStateException("Entity is already deleted");
+            if (existing.isDeleted() != restoring) throw new IllegalStateException(restoring ? "Entity is already active" : "Entity is already deleted");
             Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
             Map<String, Object> merged = replace
                     ? propertyValidator.restore(schema, objectProperties(type), objectConstraints(type), id, properties, existing.properties(), context, now)
@@ -398,12 +503,12 @@ public final class InMemoryStorageProvider implements StorageProvider {
             uniqueProperties.check(schema, "object", type, objectProperties(type), id, merged, () -> currentProperties(false, type));
             Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             ObjectRecord updated = new ObjectRecord(context.tenantId(), type, id,
-                    existing.version() + 1, existing.createdAt(), now, existing.deletedAt(),
-                    transactionId, null, merged);
+                    existing.version() + 1, existing.createdAt(), now, restoring ? null : existing.deletedAt(),
+                    transactionId, sourceActionId(), merged);
             working.objects.put(key, updated);
-            appendHistory(new EntityKey(type, id), updated.version(), EntityOperation.UPDATED,
+            appendHistory(new EntityKey(type, id), updated.version(), restoring ? EntityOperation.RESTORED : EntityOperation.UPDATED,
                     effective, null, now, merged);
-            uniqueProperties.applied(schema, "object", type, objectProperties(type), id, existing.properties(), merged);
+            uniqueProperties.applied(schema, "object", type, objectProperties(type), id, restoring ? null : existing.properties(), merged);
             return updated;
         }
 
@@ -423,7 +528,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
             Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             ObjectRecord deleted = new ObjectRecord(context.tenantId(), type, id,
                     existing.version() + 1, existing.createdAt(), now, effective,
-                    transactionId, null, existing.properties());
+                    transactionId, sourceActionId(), existing.properties());
             working.objects.put(key, deleted);
             appendHistory(new EntityKey(type, id), deleted.version(), EntityOperation.DELETED,
                     effective, null, now, existing.properties());
@@ -459,7 +564,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
             enforceCardinality(definition, from, to);
             enforceHistoricalCardinality(definition, from, to, effective, now);
             LinkRecord link = new LinkRecord(context.tenantId(), type, id, from, to, 1,
-                    now, now, null, effective, null, transactionId, null, properties);
+                    now, now, null, effective, null, transactionId, sourceActionId(), properties);
             working.links.put(key, link);
             appendHistory(new EntityKey(type, id), 1, EntityOperation.CREATED,
                     effective, null, now, linkState(link));
@@ -488,7 +593,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
             LinkRecord updated = new LinkRecord(context.tenantId(), type, id, existing.from(),
                     existing.to(), existing.version() + 1, existing.createdAt(), now,
                     existing.deletedAt(), existing.validFrom(), existing.validTo(),
-                    transactionId, null, merged);
+                    transactionId, sourceActionId(), merged);
             working.links.put(key, updated);
             appendHistory(new EntityKey(type, id), updated.version(), EntityOperation.UPDATED,
                     effective, null, now, linkState(updated));
@@ -512,7 +617,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
             Instant effective = TemporalHistory.effectiveAt(effectiveAt, now, working.history.getOrDefault(historyKey(context, new EntityKey(type, id)), List.of()));
             LinkRecord deleted = new LinkRecord(context.tenantId(), type, id, existing.from(),
                     existing.to(), existing.version() + 1, existing.createdAt(), now, effective,
-                    existing.validFrom(), effective, transactionId, null, existing.properties());
+                    existing.validFrom(), effective, transactionId, sourceActionId(), existing.properties());
             working.links.put(key, deleted);
             appendHistory(new EntityKey(type, id), deleted.version(), EntityOperation.DELETED,
                     effective, null, now, linkState(deleted));
@@ -539,7 +644,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
                     Map.of(), existing.properties(), context, now);
             uniqueProperties.check(schema, "link", type, definition.properties(), id, properties, () -> currentProperties(true, type));
             var restored = new LinkRecord(context.tenantId(), type, id, existing.from(), existing.to(), existing.version() + 1,
-                    existing.createdAt(), now, null, effective, null, transactionId, null, properties);
+                    existing.createdAt(), now, null, effective, null, transactionId, sourceActionId(), properties);
             working.links.put(key, restored);
             appendHistory(new EntityKey(type, id), restored.version(), EntityOperation.RESTORED, effective, null, now, linkState(restored));
             uniqueProperties.applied(schema, "link", type, definition.properties(), id, null, properties);
@@ -689,9 +794,36 @@ public final class InMemoryStorageProvider implements StorageProvider {
         private void appendHistory(EntityKey key, long version, EntityOperation operation,
                                    Instant validFrom, Instant validTo, Instant recordedAt,
                                    Map<String, Object> snapshot) {
-            working.history.computeIfAbsent(historyKey(context, key), ignored -> new ArrayList<>())
-                    .add(new HistorySnapshot(key, version, operation, validFrom, validTo,
-                            recordedAt, transactionId, null, context.actorId(), null, snapshot));
+            var history = working.history.computeIfAbsent(historyKey(context, key), ignored -> new ArrayList<>());
+            var previous = history.isEmpty() ? null : history.getLast().state();
+            var definitions = schema.objectTypes().stream().filter(type -> type.name().equals(key.type())).findFirst()
+                    .map(ObjectTypeDefinition::properties).orElseGet(() -> requireLinkType(key.type()).properties());
+            freezeSource(recordedAt);
+            appendLineage(key, version, LineageValues.changes(definitions, previous, snapshot, operation), recordedAt);
+            history.add(new HistorySnapshot(key, version, operation, validFrom, validTo,
+                    recordedAt, transactionId, source.actionId(), context.actorId(), source.sourceSystem(), snapshot));
+        }
+
+        private void freezeSource(Instant now) {
+            if (source == null) source = MutationSource.direct(transactionId, now);
+            sourceFrozen = true;
+        }
+
+        private void appendLineage(EntityKey key, long version, Map<String, LineageValues.Value> fields, Instant now) {
+            if (fields.isEmpty()) return;
+            freezeSource(now);
+            try {
+                var records = working.lineage.computeIfAbsent(historyKey(context, key), ignored -> new ArrayList<>());
+                long sequence = records.isEmpty() ? 0 : records.getLast().sequence();
+                for (var entry : fields.entrySet()) {
+                    sequence = Math.incrementExact(sequence);
+                    records.add(new FieldProvenance(context.tenantId(), key, entry.getKey(), sequence, version,
+                            entry.getValue().present(), entry.getValue().hash(), now, transactionId, context.actorId(), source));
+                }
+            } catch (RuntimeException | Error failure) {
+                rollbackOnly = true;
+                throw failure;
+            }
         }
 
         private void enforceCardinality(LinkTypeDefinition definition, EntityKey from, EntityKey to) {
@@ -763,6 +895,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
         }
 
         private void assertOpen() {
+            if (rollbackOnly) throw new IllegalStateException("transaction requires rollback after a lineage failure");
             if (!Objects.equals(transactionSchemaId, schemaId)) throw new org.openfoundry.foundation.spi.SchemaVersionMismatchException();
             if (closed) {
                 throw new IllegalStateException("transaction is closed");
@@ -803,19 +936,23 @@ public final class InMemoryStorageProvider implements StorageProvider {
         private final Map<String, ObjectRecord> objects;
         private final Map<String, LinkRecord> links;
         private final Map<String, List<HistorySnapshot>> history;
+        private final Map<String, List<FieldProvenance>> lineage;
+        private final Map<String, IngestionReceipt> ingestionReceipts;
+        private final Map<String, IngestionCheckpoint> checkpoints;
         private final List<AuditEntry> audits;
         private final List<OutboxEntry> outbox;
         private final Map<String, org.openfoundry.foundation.spi.CommandReceipt> receipts;
         private final Map<String, org.openfoundry.foundation.spi.ActionExecution> executions;
 
         private State() {
-            this(new HashMap<>(), new HashMap<>(), new HashMap<>(), new ArrayList<>(), new ArrayList<>(), new HashMap<>(), new HashMap<>());
+            this(new HashMap<>(), new HashMap<>(), new HashMap<>(), new ArrayList<>(), new ArrayList<>(), new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashMap<>());
         }
 
         private State(Map<String, ObjectRecord> objects, Map<String, LinkRecord> links,
                       Map<String, List<HistorySnapshot>> history, List<AuditEntry> audits,
                       List<OutboxEntry> outbox, Map<String, org.openfoundry.foundation.spi.CommandReceipt> receipts,
-                      Map<String, org.openfoundry.foundation.spi.ActionExecution> executions) {
+                      Map<String, org.openfoundry.foundation.spi.ActionExecution> executions, Map<String, List<FieldProvenance>> lineage,
+                      Map<String, IngestionReceipt> ingestionReceipts, Map<String, IngestionCheckpoint> checkpoints) {
             this.objects = objects;
             this.links = links;
             this.history = history;
@@ -823,13 +960,18 @@ public final class InMemoryStorageProvider implements StorageProvider {
             this.outbox = outbox;
             this.receipts = receipts;
             this.executions = executions;
+            this.lineage = lineage;
+            this.ingestionReceipts = ingestionReceipts;
+            this.checkpoints = checkpoints;
         }
 
         private State copy() {
             Map<String, List<HistorySnapshot>> copiedHistory = new HashMap<>();
             history.forEach((key, value) -> copiedHistory.put(key, new ArrayList<>(value)));
+            var copiedLineage = new HashMap<String, List<FieldProvenance>>();
+            lineage.forEach((key, value) -> copiedLineage.put(key, new ArrayList<>(value)));
             return new State(new HashMap<>(objects), new HashMap<>(links), copiedHistory,
-                    new ArrayList<>(audits), new ArrayList<>(outbox), new HashMap<>(receipts), new HashMap<>(executions));
+                    new ArrayList<>(audits), new ArrayList<>(outbox), new HashMap<>(receipts), new HashMap<>(executions), copiedLineage, new HashMap<>(ingestionReceipts), new HashMap<>(checkpoints));
         }
     }
 }

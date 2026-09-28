@@ -15,6 +15,40 @@ public interface Transaction extends AutoCloseable {
         throw new UnsupportedOperationException("This transaction does not support in-memory commit participants");
     }
 
+    /** Must be set before the first fact write; absent explicit source is recorded as DIRECT by supporting providers. */
+    default void mutationSource(MutationSource source) {
+        throw new UnsupportedOperationException("Transactional lineage is not supported");
+    }
+
+    default java.util.Map<String, FieldProvenance> latestLineage(EntityKey key) {
+        throw new UnsupportedOperationException("Transactional lineage reads are not supported");
+    }
+
+    /** Record a newly accepted source observation of current values without inventing a new fact version. */
+    default void recordProvenance(EntityKey key, long expectedVersion, java.util.Set<String> fields) {
+        throw new UnsupportedOperationException("Transactional provenance observations are not supported");
+    }
+
+    default IngestionReceipt getIngestionReceipt(String key) {
+        throw new UnsupportedOperationException("Transactional ingestion receipts are not supported");
+    }
+
+    default void putIngestionReceipt(IngestionReceipt receipt) {
+        throw new UnsupportedOperationException("Transactional ingestion receipts are not supported");
+    }
+
+    default IngestionCheckpoint getIngestionCheckpoint(String key) {
+        throw new UnsupportedOperationException("Transactional ingestion checkpoints are not supported");
+    }
+
+    default void putIngestionCheckpoint(IngestionCheckpoint checkpoint, long expectedVersion) {
+        throw new UnsupportedOperationException("Transactional ingestion checkpoints are not supported");
+    }
+
+    default ObjectRecord restoreObject(String type, String id, Map<String, Object> properties, long expectedVersion) {
+        throw new UnsupportedOperationException("Object restoration is not supported");
+    }
+
     ObjectRecord createObject(String type, String id, Map<String, Object> properties);
 
     ObjectRecord updateObject(String type, String id, Map<String, Object> properties,

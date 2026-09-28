@@ -134,6 +134,9 @@ final class SideEffectRuntime {
                 authorize(manifest, definition, context, actor, tx, run);
                 if (!run.status().equals("COMPENSATING")) return run;
                 attemptedVersion[0] = run.version();
+                if (storage.capabilities().transactionalLineage()) {
+                    tx.mutationSource(org.openfoundry.foundation.spi.MutationSource.action(manifest.action(), id, now(), true));
+                }
                 var state = ActionContinuationState.mutable(run);
                 if (ConsentEffects.present(manifest)) consent.compensate(manifest, state.get("consent"), id, context, tx);
                 var journal = ActionContinuationState.maps(state.get("journal"));
@@ -150,7 +153,16 @@ final class SideEffectRuntime {
                         throw new IllegalStateException("Compensation version conflict");
                     }
                     switch (kind) {
-                        case "UPDATE_OBJECT" -> tx.restoreObjectProperties(key.type(), key.id(), ActionContinuationState.map(item.get("before")), currentVersion);
+                        case "UPDATE_OBJECT" -> {
+                            var restored = tx.restoreObjectProperties(key.type(), key.id(), ActionContinuationState.map(item.get("before")), currentVersion);
+                            if (storage.capabilities().transactionalLineage()) {
+                                var reasserted = tx.latestLineage(key).values().stream()
+                                        .filter(record -> !record.field().equals("_entity") && record.source().kind() == org.openfoundry.foundation.spi.MutationSource.Kind.ACTION
+                                                && record.source().operationId().equals(id) && "EXECUTION".equals(record.source().details().get("phase")))
+                                        .map(org.openfoundry.foundation.spi.FieldProvenance::field).collect(java.util.stream.Collectors.toSet());
+                                if (!reasserted.isEmpty()) tx.recordProvenance(key, restored.version(), reasserted);
+                            }
+                        }
                         case "CREATE_OBJECT" -> {
                             if (!tx.connectedLinks(key).isEmpty()) throw new IllegalStateException("Compensation object has active relationships");
                             tx.deleteObject(key.type(), key.id(), currentVersion);

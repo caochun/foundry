@@ -148,7 +148,27 @@ public interface DatabaseDialect {
                 );
                 CREATE INDEX IF NOT EXISTS idx_of_action_executions_due
                   ON of_action_executions (tenant_id, actor_id, available_at);
-                """.formatted(timestamp, text);
+                """.formatted(timestamp, text) + """
+                CREATE TABLE IF NOT EXISTS of_field_lineage (
+                  tenant_id VARCHAR(255) NOT NULL, entity_type VARCHAR(255) NOT NULL, entity_id VARCHAR(512) NOT NULL,
+                  lineage_seq BIGINT NOT NULL, field_name VARCHAR(512) NOT NULL, entity_version BIGINT NOT NULL,
+                  value_present BOOLEAN NOT NULL, value_hash VARCHAR(64) NOT NULL, recorded_at %s NOT NULL,
+                  transaction_id VARCHAR(255) NOT NULL, actor_id VARCHAR(255), source_json %s NOT NULL,
+                  PRIMARY KEY (tenant_id, entity_type, entity_id, lineage_seq)
+                );
+                CREATE INDEX IF NOT EXISTS idx_of_lineage_field ON of_field_lineage (tenant_id, entity_type, entity_id, field_name, lineage_seq);
+                """.formatted(timestamp, text) + """
+                CREATE TABLE IF NOT EXISTS of_ingestion_receipts (
+                  tenant_id VARCHAR(255) NOT NULL, receipt_key VARCHAR(64) NOT NULL, request_hash VARCHAR(64) NOT NULL,
+                  target_type VARCHAR(255) NOT NULL, target_id VARCHAR(512) NOT NULL, actor_id VARCHAR(255),
+                  result_json %s NOT NULL, PRIMARY KEY (tenant_id, receipt_key)
+                );
+                CREATE TABLE IF NOT EXISTS of_ingestion_checkpoints (
+                  tenant_id VARCHAR(255) NOT NULL, checkpoint_key VARCHAR(64) NOT NULL, version BIGINT NOT NULL,
+                  source_sequence BIGINT NOT NULL, token_json %s NOT NULL, source_system VARCHAR(255) NOT NULL,
+                  configuration_hash VARCHAR(64) NOT NULL, PRIMARY KEY (tenant_id, checkpoint_key)
+                );
+                """.formatted(text, text);
     }
 
     static DatabaseDialect h2() {
