@@ -28,6 +28,16 @@ public record PackAssets(Map<String, FieldPolicy> fieldPolicies, List<Permission
         public SeedBatch { objects = List.copyOf(objects); links = List.copyOf(links); }
     }
     public record ConnectorDefinition(String namespace, String path, String connector, Map<String, Object> config) {
-        public ConnectorDefinition { config = PropertyValues.immutableMap(config); }
+        public ConnectorDefinition {
+            if (config.containsKey("mapping") || config.containsKey("datasource")) {
+                var declaration = new org.openfoundry.foundation.sync.MappingConfigParser().parse(config);
+                if (!connector.equals(declaration.connector())) throw new IllegalArgumentException("Connector declaration disagrees with its asset identity");
+            }
+            config = PropertyValues.immutableMap(config);
+        }
+        public java.util.Optional<org.openfoundry.foundation.sync.DatasourceMapping> datasourceMapping() {
+            return config.containsKey("mapping") || config.containsKey("datasource")
+                    ? java.util.Optional.of(new org.openfoundry.foundation.sync.MappingConfigParser().parse(config)) : java.util.Optional.empty();
+        }
     }
 }

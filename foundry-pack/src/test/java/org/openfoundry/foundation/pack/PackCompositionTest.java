@@ -159,6 +159,58 @@ class PackCompositionTest {
         assertThrows(PackLoadException.class, () -> loader.loadBundle(List.of(core, app)));
     }
 
+    @Test
+    void datasourceMappingsParticipateInPackVisibilityAndSchemaBinding() throws Exception {
+        var core = pack("mapping-core", "mapping.core", "1.0.0", "", """
+                type Person @objectType { id: ID! @primary name: String! }
+                type Unit @objectType { id: ID! @primary name: String! }
+                type Member @linkType(from:"Person",to:"Unit",cardinality:MANY_TO_ONE) { id: ID! @primary }
+                """);
+        var app = pack("mapping-app", "mapping.app", "1.0.0", "connectors: [source.yaml]\n", "scalar ExternalValue");
+        String config = """
+                datasource: directory
+                connector: jdbc
+                connection: {url: '${DIRECTORY_URL}', table: people}
+                mapping:
+                  objectType: Person
+                  primaryKey: {source: id, target: id}
+                  properties:
+                    name: {source: full_name, transform: "custom('canonicalName')"}
+                  links:
+                    - linkType: Member
+                      toType: Unit
+                      toKey: {source: unit_id, target: id}
+                sync: {mode: CDC}
+                """;
+        Files.writeString(app.resolve("source.yaml"), config);
+        var loader = new DomainPackLoader();
+        assertThrows(PackLoadException.class, () -> loader.loadBundle(List.of(core, app)));
+        Files.writeString(app.resolve("pack.yaml"), manifest("mapping-app", "mapping.app", "1.0.0", "dependencies: {mapping.core: '>=1.0.0'}\nconnectors: [source.yaml]\n"));
+        var bundle = loader.loadBundle(List.of(app, core));
+        var declaration = bundle.assets().connectors().getFirst().datasourceMapping().orElseThrow();
+        assertEquals("Person", declaration.mapping().objectType());
+        assertEquals("${DIRECTORY_URL}", declaration.connection().url());
+        assertEquals("Member", declaration.mapping().links().getFirst().linkType());
+        Files.writeString(app.resolve("source.yaml"), config.replace("name: {source:", "unknown: {source:"));
+        assertThrows(PackLoadException.class, () -> loader.loadBundle(List.of(core, app)));
+    }
+
+    @Test
+    void invalidTransformSyntaxInConnectorAssetsIsNotDeferredUntilImport() throws Exception {
+        var app = pack("bad-mapping", "mapping.bad", "1.0.0", "connectors: [source.yaml]\n", "type Person @objectType { id: ID! @primary name: String! }");
+        Files.writeString(app.resolve("source.yaml"), """
+                datasource: directory
+                connector: jdbc
+                connection: {url: '${DIRECTORY_URL}', table: people}
+                mapping:
+                  objectType: Person
+                  primaryKey: {source: id, target: id}
+                  properties: {name: {source: name, transform: 'unknown()'}}
+                sync: {mode: BATCH}
+                """);
+        assertThrows(PackLoadException.class, () -> new DomainPackLoader().load(app));
+    }
+
     private Path pack(String name, String namespace, String version, String extra, String declarations) throws Exception {
         Path root = Files.createDirectory(temporary.resolve(name));
         Files.writeString(root.resolve("pack.yaml"), manifest(name, namespace, version, extra));

@@ -91,6 +91,8 @@ final class PackAssetsReader {
     }
 
     static void validate(PackAssets assets, OntologySchema schema) {
+        assets.connectors().forEach(connector -> connector.datasourceMapping().ifPresent(declaration ->
+                org.openfoundry.foundation.sync.MappingSchemaValidator.validate(declaration.mapping(), schema)));
         var fields = new LinkedHashMap<String, Set<String>>();
         schema.objectTypes().forEach(type -> fields.put(type.name(), type.properties().stream().map(field -> field.name()).collect(java.util.stream.Collectors.toSet())));
         assets.fieldPolicies().forEach((type, policy) -> {

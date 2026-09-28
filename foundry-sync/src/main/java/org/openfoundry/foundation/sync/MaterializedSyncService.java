@@ -16,16 +16,18 @@ public final class MaterializedSyncService {
     private final SyncAuthorizer authorizer;
     private final UnknownOrigins unknownOrigins;
     private final Clock clock;
+    private final TransformRegistry transforms;
 
     public MaterializedSyncService(StorageProvider storage) {
         this(storage, new ConflictResolver(ConflictResolver.Strategy.LAST_WRITE_WINS, Map.of(), Map.of()));
     }
 
     public MaterializedSyncService(StorageProvider storage, ConflictResolver conflicts) {
-        this(storage, conflicts, SyncAuthorizer.denyAll(), UnknownOrigins.REJECT_CHANGES, Clock.systemUTC());
+        this(storage, conflicts, SyncAuthorizer.denyAll(), UnknownOrigins.REJECT_CHANGES, Clock.systemUTC(), new TransformRegistry());
     }
 
-    private MaterializedSyncService(StorageProvider storage, ConflictResolver conflicts, SyncAuthorizer authorizer, UnknownOrigins unknownOrigins, Clock clock) {
+    private MaterializedSyncService(StorageProvider storage, ConflictResolver conflicts, SyncAuthorizer authorizer, UnknownOrigins unknownOrigins, Clock clock, TransformRegistry transforms) {
+        this.transforms = Objects.requireNonNull(transforms);
         this.storage = Objects.requireNonNull(storage);
         this.conflicts = Objects.requireNonNull(conflicts);
         this.authorizer = Objects.requireNonNull(authorizer);
@@ -33,9 +35,11 @@ public final class MaterializedSyncService {
         this.clock = Objects.requireNonNull(clock);
     }
 
-    public MaterializedSyncService withAuthorization(SyncAuthorizer policy) { return new MaterializedSyncService(storage, conflicts, policy, unknownOrigins, clock); }
-    public MaterializedSyncService withUnknownOrigins(UnknownOrigins policy) { return new MaterializedSyncService(storage, conflicts, authorizer, policy, clock); }
-    public MaterializedSyncService withClock(Clock clock) { return new MaterializedSyncService(storage, conflicts, authorizer, unknownOrigins, clock); }
+    public MaterializedSyncService withAuthorization(SyncAuthorizer policy) { return new MaterializedSyncService(storage, conflicts, policy, unknownOrigins, clock, transforms); }
+    public MaterializedSyncService withUnknownOrigins(UnknownOrigins policy) { return new MaterializedSyncService(storage, conflicts, authorizer, policy, clock, transforms); }
+    public MaterializedSyncService withClock(Clock clock) { return new MaterializedSyncService(storage, conflicts, authorizer, unknownOrigins, clock, transforms); }
+
+    public MaterializedSyncService withTransforms(TransformRegistry registry) { return new MaterializedSyncService(storage, conflicts, authorizer, unknownOrigins, clock, registry); }
 
     public IngestionCheckpoint checkpoint(String connector, MappingConfig mapping, String partition, RequestContext context) {
         requirePipeline(context, connector, mapping);
@@ -48,11 +52,13 @@ public final class MaterializedSyncService {
         requirePipeline(context, connector.name(), mapping);
         var binding = Objects.requireNonNull(storage.schemaBinding(), "Apply the schema before ingestion");
         storage.requireSchemaBinding(context, binding);
+        MappingSchemaValidator.validate(mapping, binding.schema());
+        if (!mapping.links().isEmpty()) throw new UnsupportedOperationException("Relationship mapping requires an explicit relationship reconciliation applier");
         var definition = binding.schema().objectTypes().stream().filter(type -> type.name().equals(mapping.objectType())).findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("Unknown mapping object type"));
         var fields = new LinkedHashMap<String, PropertyDefinition>();
         definition.properties().forEach(field -> fields.put(field.name(), field));
-        for (String field : mapping.sourceToTarget().values()) {
+        for (String field : mapping.properties().keySet()) {
             if (!fields.containsKey(field) || fields.get(field).readOnly()) throw new IllegalArgumentException("Unknown or managed mapping target: " + field);
         }
         var governedFields = fields.values().stream().filter(field -> !field.primary() && !field.readOnly()).map(PropertyDefinition::name)
@@ -60,8 +66,8 @@ public final class MaterializedSyncService {
         governedFields.add("_entity");
         if (!governedFields.containsAll(conflicts.configuredFields())) throw new IllegalArgumentException("Conflict policy names an unknown or managed field");
         String runId = "sync_" + UUID.randomUUID();
-        String configuration = configuration(mapping);
-        var mapper = new RecordMapper(mapping);
+        var mapper = new RecordMapper(mapping, transforms);
+        String configuration = configuration(mapper.fingerprint());
         var counts = new Counts();
         var failures = new ArrayList<SyncFailure>();
         try (var records = connector.read(query)) {
@@ -71,7 +77,7 @@ public final class MaterializedSyncService {
                 try {
                     var mapped = mapper.map(source);
                     var values = normalize(binding.schema(), fields, mapped);
-                    var origin = origin(connector.name(), mapping, source, runId, binding.id());
+                    var origin = origin(connector.name(), mapper.fingerprint(), source, runId, binding.id());
                     var outcome = apply(context, connector.name(), mapping, source, mapped.key(), values, origin, configuration, fields, binding);
                     counts.add(outcome);
                 } catch (RuntimeException failure) {
@@ -250,11 +256,11 @@ public final class MaterializedSyncService {
         return PropertyValues.immutableMap(result);
     }
 
-    private MutationSource origin(String connector, MappingConfig mapping, SourceRecord record, String runId, String binding) {
+    private MutationSource origin(String connector, String mappingVersion, SourceRecord record, String runId, String binding) {
         var details = new LinkedHashMap<String, Object>();
         details.put("connector", connector);
         details.put("sourcePointer", record.sourceRecordId());
-        details.put("mappingVersion", mappingHash(mapping));
+        details.put("mappingVersion", mappingVersion);
         details.put("schemaBinding", binding);
         details.put("observedAt", record.observedAt().toString());
         if (record.provenance() != null) {
@@ -281,11 +287,11 @@ public final class MaterializedSyncService {
     }
 
     private String configuration(MappingConfig mapping) {
-        return LineageValues.hash(true, Map.of("format", "materialized-sync-v1", "mapping", mappingHash(mapping), "conflicts", conflicts.configuration(), "unknownOrigins", unknownOrigins.name()));
+        return configuration(new RecordMapper(mapping, transforms).fingerprint());
     }
 
-    private static String mappingHash(MappingConfig mapping) {
-        return LineageValues.hash(true, Map.of("type", mapping.objectType(), "primary", mapping.primaryKeyField(), "fields", mapping.sourceToTarget()));
+    private String configuration(String mappingVersion) {
+        return LineageValues.hash(true, Map.of("format", "materialized-sync-v1", "mapping", mappingVersion, "conflicts", conflicts.configuration(), "unknownOrigins", unknownOrigins.name()));
     }
 
     private static String checkpointKey(String connector, MappingConfig mapping, String partition) {

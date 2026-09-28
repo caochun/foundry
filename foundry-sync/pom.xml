@@ -15,6 +15,11 @@
 
     <dependencies>
         <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+            <version>2.3</version>
+        </dependency>
+        <dependency>
             <groupId>org.openfoundry</groupId>
             <artifactId>foundry-storage-jdbc</artifactId>
             <version>${project.version}</version>

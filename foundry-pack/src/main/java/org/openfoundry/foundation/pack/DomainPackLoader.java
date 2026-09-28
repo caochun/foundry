@@ -78,6 +78,13 @@ public final class DomainPackLoader {
                 batch.objects().forEach(object -> references.add(object.type()));
                 batch.links().forEach(link -> references.add(link.type()));
             });
+            input.assets.connectors().forEach(connector -> connector.datasourceMapping().ifPresent(declaration -> {
+                references.add(declaration.mapping().objectType());
+                declaration.mapping().links().forEach(link -> {
+                    references.add(link.linkType());
+                    references.add(link.toType());
+                });
+            }));
             input.actions.values().forEach(action -> action.effects().forEach(effect -> {
                 if (effect instanceof ActionManifest.CreateObject object) references.add(object.objectType());
                 if (effect instanceof ActionManifest.CreateLink link) references.add(link.linkType());
