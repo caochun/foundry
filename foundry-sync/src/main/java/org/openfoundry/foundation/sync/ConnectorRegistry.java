@@ -60,6 +60,14 @@ public final class ConnectorRegistry {
         return connector;
     }
 
+    /** Register the built-in HTTP JSON adapter; custom trusted factories may supply scoped credentials. */
+    public static ConnectorRegistry rest() {
+        var registry = new ConnectorRegistry();
+        registry.register(new Plugin("rest", RestSourceConnector.VERSION, "Paginated JSON REST extraction",
+                mapping -> new RestSourceConnector(mapping.datasource(), mapping.datasource())));
+        return registry;
+    }
+
     /** The host owns credentials, endpoint resolution and the DataSource pool lifecycle. */
     public static ConnectorRegistry jdbc(Function<DatasourceMapping.Connection, DataSource> resolver) {
         Objects.requireNonNull(resolver);
