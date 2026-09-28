@@ -89,7 +89,7 @@ public final class ActionExecutor {
 
     public ActionResult resume(ActionManifest manifest, ActionTypeDefinition definition, String actionId,
                                RequestContext context, ActionActor actor, StorageProvider storage) {
-        return new SideEffectRuntime(sideEffects, authorizer, clock, lease, consent).resume(configured(manifest), definition, actionId, context, actor, storage);
+        return new SideEffectRuntime(sideEffects, authorizer, clock, lease, consent, parameterSchema).resume(configured(manifest), definition, actionId, context, actor, storage);
     }
 
     public List<ActionResult> resumePending(Map<String, ActionManifest> manifests, Map<String, ActionTypeDefinition> definitions,
@@ -190,6 +190,12 @@ public final class ActionExecutor {
                         committed = decodeResult(receipt.result());
                         if (receipt.result().containsKey("access")) access = ActionEffectAccess.decode(receipt.result().get("access"));
                     }
+                    Object navigationJournal = ((Number) format).intValue() == 2
+                            ? transaction.getActionExecution(committed.actionId()).state().get("navigation") : receipt.result().get("navigation");
+                    ActionNavigation.authorizeJournal(parameterSchema, manifest, definition, resolved, navigationJournal,
+                            ((Number) format).intValue() == 2 ? transaction.getActionExecution(committed.actionId()).state().get("navigationDigest") : receipt.result().get("navigationDigest"),
+                            ((Number) format).intValue() == 2 ? transaction.getActionExecution(committed.actionId()).state().get("consent") : receipt.result().get("consent"), context, actor,
+                            authorizer, access == null ? List.of() : access, transaction);
                     if (ConsentEffects.present(manifest)) {
                         Object consentJournal = receipt.result().get("consent");
                         if (((Number) format).intValue() == 2) consentJournal = transaction.getActionExecution(committed.actionId()).state().get("consent");
@@ -201,7 +207,8 @@ public final class ActionExecutor {
                     parameters.forEach((name, value) -> checkReferenceVersions(value, resolved.get(name)));
                     var access = new ArrayList<ActionEffectAccess>();
                     var consentJournal = new ArrayList<Map<String, Object>>();
-                    committed = applyEffects(manifest, definition, context, actor, resolved, storage, transaction, true, access, consentJournal);
+                    var navigationJournal = new ArrayList<Map<String, Object>>();
+                    committed = applyEffects(manifest, definition, context, actor, resolved, storage, transaction, true, access, consentJournal, navigationJournal);
                     if (!committed.success()) return committed;
                     if (key != null) {
                         Map<String, Object> result = manifest.sideEffects().isEmpty()
@@ -212,6 +219,11 @@ public final class ActionExecutor {
                         if (ConsentEffects.present(manifest) && manifest.sideEffects().isEmpty()) {
                             result = new LinkedHashMap<>(result);
                             result.put("consent", consentJournal);
+                        }
+                        if (manifest.sideEffects().isEmpty()) {
+                            result = new LinkedHashMap<>(result);
+                            result.put("navigation", navigationJournal);
+                            result.put("navigationDigest", ActionFingerprint.hash(navigationJournal));
                         }
                         transaction.putCommandReceipt(new org.openfoundry.foundation.spi.CommandReceipt(key, actor.id(), manifest.action(), fingerprint, result));
                     }
@@ -266,7 +278,7 @@ public final class ActionExecutor {
     private ActionResult executeEffects(ActionManifest manifest, ActionTypeDefinition definition, RequestContext context, ActionActor actor,
                                         Map<String, Object> parameters, StorageProvider storage) {
         try (Transaction transaction = storage.beginTransaction(context)) {
-            ActionResult result = applyEffects(manifest, definition, context, actor, parameters, storage, transaction, false, new ArrayList<>(), new ArrayList<>());
+            ActionResult result = applyEffects(manifest, definition, context, actor, parameters, storage, transaction, false, new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
             if (result.success()) transaction.commit();
             return result;
         }
@@ -274,24 +286,29 @@ public final class ActionExecutor {
 
     private ActionResult applyEffects(ActionManifest manifest, ActionTypeDefinition definition, RequestContext context, ActionActor actor,
                                       Map<String, Object> parameters, StorageProvider storage, Transaction transaction,
-                                      boolean transactional, List<ActionEffectAccess> access, List<Map<String, Object>> consentJournal) {
+                                      boolean transactional, List<ActionEffectAccess> access, List<Map<String, Object>> consentJournal,
+                                      List<Map<String, Object>> navigationJournal) {
         String actionId = "act_" + UUID.randomUUID();
         Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
-        var expressions = new ActionValues(parameters, actor, now);
+        var journal = new ArrayList<Map<String, Object>>();
+        var navigation = new ActionNavigation(parameterSchema, context, actor, definition, parameters, authorizer, transaction,
+                () -> ActionEffectAccess.decode(journal), navigationJournal);
+        var expressions = new ActionValues(parameters, actor, now, navigation);
+        navigation.preload(manifest, expressions);
         for (ActionManifest.Precondition precondition : manifest.preconditions()) {
-            if (!evaluator.evaluate(precondition.expression(), parameters, actor, now)) {
+            if (!evaluator.evaluate(precondition.expression(), expressions.evaluationParameters(), actor, now)) {
                 return new ActionResult(false, actionId, List.of(), "REJECTED", List.of(
                         new ActionResult.Failure("PRECONDITION_FAILED", "", precondition.error(), null)));
             }
         }
 
         List<EntityKey> affected = new ArrayList<>();
-        var journal = new ArrayList<Map<String, Object>>();
         var pendingConsent = new ArrayList<ConsentEffects.Pending>();
         for (int effectIndex = 0; effectIndex < manifest.effects().size(); effectIndex++) {
             ActionManifest.ActionEffect effect = manifest.effects().get(effectIndex);
             if (effect instanceof ActionManifest.RecordConsent record) {
-                boolean apply = record.condition() == null || evaluator.evaluateBindings(record.condition(), parameters, expressions.createdBindings(), actor, now);
+                navigation.preloadCondition(record.condition(), expressions);
+                boolean apply = record.condition() == null || evaluator.evaluateBindings(record.condition(), expressions.evaluationParameters(), expressions.createdBindings(), actor, now);
                 if (apply) pendingConsent.add(new ConsentEffects.Pending(record, expressions.consentSubject(record.subject(), record.subjectType(), consent.fallbackType()), effectIndex));
                 else consentJournal.add(Map.of("effect", effectIndex, "applied", false));
                 continue;
@@ -308,7 +325,13 @@ public final class ActionExecutor {
                 affected.add(target.key());
             } else if (effect instanceof ActionManifest.CreateObject create) {
                 Map<String, Object> values = expressions.properties(create.properties());
-                String id = create.target() == null ? create.objectType() + "-" + UUID.randomUUID() : resolveId(create.target(), parameters);
+                String id;
+                if (create.target() == null) id = create.objectType() + "-" + UUID.randomUUID();
+                else if (create.target().contains(".") && expressions.hasRoot(create.target())) {
+                    Object value = expressions.value(create.target());
+                    if (!(value instanceof String text) || text.isBlank()) throw new IllegalArgumentException("Create target must resolve to an ID");
+                    id = text;
+                } else id = resolveId(create.target(), parameters);
                 ObjectRecord created = transaction.createObject(create.objectType(), id, values);
                 expressions.created(created);
                 journal.add(ActionContinuationState.undo("CREATE_OBJECT", created.key(), created.version(), Map.of()));
@@ -340,11 +363,17 @@ public final class ActionExecutor {
         if (!authorizer.allowedEffects(context, actor, definition, parameters, access, transaction)) {
             throw new SecurityException("Action effects denied");
         }
+        boolean continued = !manifest.sideEffects().isEmpty();
+        var state = continued ? ActionContinuationState.initial(manifest, definition, parameters, expressions, affected, journal, now, transaction.transactionId()) : null;
+        // Snapshot side-effect inputs first, then check every read before publishing this action's consent decisions.
+        var appliedConsent = pendingConsent.stream().map(pending -> Map.<String, Object>of("effect", pending.index(), "applied", true)).toList();
+        ActionNavigation.authorizeJournal(parameterSchema, manifest, definition, parameters, navigationJournal, ActionFingerprint.hash(navigationJournal), appliedConsent, context, actor,
+                authorizer, access, transaction);
         for (var pending : pendingConsent) consentJournal.add(consent.apply(pending, context, actor, definition, parameters, authorizer, transaction));
         consentJournal.sort(java.util.Comparator.comparingInt(entry -> ((Number) entry.get("effect")).intValue()));
-        boolean continued = !manifest.sideEffects().isEmpty();
         if (continued) {
-            var state = ActionContinuationState.initial(manifest, definition, parameters, expressions, affected, journal, now, transaction.transactionId());
+            state.put("navigation", navigationJournal);
+            state.put("navigationDigest", ActionFingerprint.hash(navigationJournal));
             if (ConsentEffects.present(manifest)) state.put("consent", consentJournal);
             transaction.putActionExecution(new org.openfoundry.foundation.spi.ActionExecution(actionId, actor.id(), manifest.action(), 1,
                     "PENDING", now, state), 0);

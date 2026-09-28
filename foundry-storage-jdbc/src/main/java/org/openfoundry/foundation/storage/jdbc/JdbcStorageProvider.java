@@ -912,10 +912,15 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
 
         @Override
         public List<LinkRecord> findLinks(String type, EntityKey from, EntityKey to) {
+            return findLinks(type, from, to, false);
+        }
+
+        @Override
+        public List<LinkRecord> findLinks(String type, EntityKey from, EntityKey to, boolean includeDeleted) {
             assertOpen();
             requireLinkType(type);
             if (from == null && to == null) throw new IllegalArgumentException("A relationship endpoint is required");
-            String sql = linkSelect() + " WHERE tenant_id = ? AND link_type = ? AND deleted_at IS NULL"
+            String sql = linkSelect() + " WHERE tenant_id = ? AND link_type = ?" + (includeDeleted ? "" : " AND deleted_at IS NULL")
                     + (from == null ? "" : " AND from_type = ? AND from_id = ?")
                     + (to == null ? "" : " AND to_type = ? AND to_id = ?") + " ORDER BY link_id";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {

@@ -19,8 +19,11 @@ final class SideEffectRuntime {
     private final Clock clock;
     private final Duration lease;
     private final ConsentEffects consent;
+    private final org.openfoundry.foundation.spi.schema.OntologySchema schema;
 
-    SideEffectRuntime(SideEffectHandler handler, ActionAuthorizer authorizer, Clock clock, Duration lease, ConsentEffects consent) {
+    SideEffectRuntime(SideEffectHandler handler, ActionAuthorizer authorizer, Clock clock, Duration lease, ConsentEffects consent,
+                      org.openfoundry.foundation.spi.schema.OntologySchema schema) {
+        this.schema = schema;
         this.consent = consent;
         this.handler = handler;
         this.authorizer = authorizer;
@@ -187,6 +190,8 @@ final class SideEffectRuntime {
             throw new IllegalArgumentException("Continuation configuration changed");
         }
         var parameters = ActionContinuationState.parameters(run.state(), transaction);
+        ActionNavigation.authorizeJournal(schema, manifest, definition, parameters, run.state().get("navigation"), run.state().get("navigationDigest"), run.state().get("consent"), context, actor,
+                authorizer, ActionEffectAccess.decode(run.state().get("journal")), transaction);
         if (ConsentEffects.present(manifest)) {
             if (consent == null) throw new IllegalStateException("Consent continuation store is not configured");
             consent.authorizeJournal(manifest, run.state().get("consent"), context, actor, definition, parameters, authorizer, transaction);

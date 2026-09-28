@@ -423,7 +423,8 @@ public final class ApplicationService {
     }
 
     private OntologyActionAuthorizer ontologyPolicy(SecurityPrincipal principal) {
-        return new OntologyActionAuthorizer(authorization, principal, objectTypes, relationTypes);
+        return new OntologyActionAuthorizer(authorization, principal, objectTypes, relationTypes,
+                (context, read, effects) -> navigationAllowed(context, principal, read, effects));
     }
 
     private boolean consentAllowed(RequestContext context, SecurityPrincipal principal, EntityKey key) {
@@ -477,11 +478,63 @@ public final class ApplicationService {
                 return true;
             }
 
+            @Override
+            public boolean allowedUpdate(RequestContext ctx, ActionActor actor, ActionTypeDefinition type,
+                                         Map<String, Object> values, EntityKey target, List<ActionEffectAccess> preceding, Transaction transaction) {
+                boolean created = preceding.stream().anyMatch(effect -> effect.kind() == ActionEffectAccess.Kind.CREATE_OBJECT && effect.entity().equals(target));
+                return created ? check(ctx, type, values, transaction) : allowedChanges(ctx, actor, type, values, List.of(target), transaction);
+            }
+
+            @Override
+            public boolean allowedEffects(RequestContext ctx, ActionActor actor, ActionTypeDefinition type,
+                                          Map<String, Object> values, List<ActionEffectAccess> effects, Transaction transaction) {
+                if (!check(ctx, type, values, transaction)) return false;
+                var created = effects.stream().filter(effect -> effect.kind() == ActionEffectAccess.Kind.CREATE_OBJECT)
+                        .map(ActionEffectAccess::entity).collect(Collectors.toSet());
+                for (var effect : effects) {
+                    if (effect.kind() == ActionEffectAccess.Kind.UPDATE_OBJECT && !created.contains(effect.entity())
+                            && !allowedChanges(ctx, actor, type, values, List.of(effect.entity()), transaction)) return false;
+                    if (effect.kind() == ActionEffectAccess.Kind.CREATE_LINK) {
+                        var link = transaction.getLink(effect.entity().type(), effect.entity().id());
+                        if (link == null) return false;
+                        for (var endpoint : List.of(link.from(), link.to())) {
+                            if (!created.contains(endpoint) && !authorization.check(ctx, principal, type.permission(), endpoint)) return false;
+                        }
+                    }
+                }
+                return true;
+            }
+
+            @Override
+            public boolean allowedNavigation(RequestContext ctx, ActionActor actor, ActionTypeDefinition type,
+                                             Map<String, Object> values, ActionNavigationRead read,
+                                             List<ActionEffectAccess> preceding, Transaction transaction) {
+                return check(ctx, type, values, transaction) && navigationAllowed(ctx, principal, read, preceding);
+            }
+
             private boolean check(RequestContext ctx, ActionTypeDefinition type, Map<String, Object> values, Transaction transaction) {
                 return authorization.check(ctx, principal, type.permission(), new EntityKey("ActionType", type.name()))
                         && permittedReferences(ctx, principal, type.permission(), values.values());
             }
         };
+    }
+
+    private boolean navigationAllowed(RequestContext context, SecurityPrincipal principal, ActionNavigationRead read,
+                                      List<ActionEffectAccess> effects) {
+        if (!visibleLinkField(principal, read.source().type(), read.field())) return false;
+        var created = effects.stream().filter(effect -> effect.kind() == ActionEffectAccess.Kind.CREATE_OBJECT
+                        || effect.kind() == ActionEffectAccess.Kind.CREATE_LINK).map(ActionEffectAccess::entity).collect(Collectors.toSet());
+        if (!created.contains(read.source().key()) && !authorization.check(context, principal, "viewer", read.source().key())) return false;
+        for (var target : read.targets()) {
+            if (!created.contains(target.key()) && !authorization.check(context, principal, "viewer", target.key())) return false;
+        }
+        if (authorizationMode == AuthorizationMode.STRICT_RESOURCES) {
+            for (var link : read.links()) {
+                var key = new EntityKey(link.type(), link.id());
+                if (!created.contains(key) && !authorization.check(context, principal, "viewer", key)) return false;
+            }
+        }
+        return true;
     }
 
     private Object resolve(RequestContext context, String type, Object value) {

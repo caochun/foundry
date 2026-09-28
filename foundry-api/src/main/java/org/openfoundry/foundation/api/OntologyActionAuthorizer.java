@@ -19,8 +19,16 @@ final class OntologyActionAuthorizer implements ActionAuthorizer {
     private final SecurityPrincipal principal;
     private final Set<String> objectTypes;
     private final Set<String> linkTypes;
+    private final NavigationPolicy navigation;
 
-    OntologyActionAuthorizer(AuthorizationService authorization, SecurityPrincipal principal, Set<String> objectTypes, Set<String> linkTypes) {
+    @FunctionalInterface
+    interface NavigationPolicy {
+        boolean allowed(RequestContext context, ActionNavigationRead read, List<ActionEffectAccess> effects);
+    }
+
+    OntologyActionAuthorizer(AuthorizationService authorization, SecurityPrincipal principal, Set<String> objectTypes, Set<String> linkTypes,
+                             NavigationPolicy navigation) {
+        this.navigation = navigation;
         this.authorization = authorization;
         this.principal = principal;
         this.objectTypes = objectTypes;
@@ -111,6 +119,13 @@ final class OntologyActionAuthorizer implements ActionAuthorizer {
     public boolean allowedReplay(RequestContext context, ActionActor actor, ActionTypeDefinition definition, Map<String, Object> values,
                                  List<ActionEffectAccess> effects, Transaction transaction) {
         return allowedEffects(context, actor, definition, values, effects, transaction);
+    }
+
+    @Override
+    public boolean allowedNavigation(RequestContext context, ActionActor actor, ActionTypeDefinition definition,
+                                     Map<String, Object> values, ActionNavigationRead read,
+                                     List<ActionEffectAccess> preceding, Transaction transaction) {
+        return allowed(context, actor, definition, values) && navigation.allowed(context, read, preceding);
     }
 
     private boolean visibleReferences(RequestContext context, Iterable<?> values, Set<EntityKey> primary) {

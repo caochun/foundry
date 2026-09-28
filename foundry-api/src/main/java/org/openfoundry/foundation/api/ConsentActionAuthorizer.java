@@ -64,6 +64,19 @@ final class ConsentActionAuthorizer implements ActionAuthorizer {
                                             EntityKey subject, String purpose, Transaction tx) {
         return delegate.allowedConsent(ctx, actor, type, values, subject, purpose, tx);
     }
+    @Override
+    public boolean allowedNavigation(RequestContext ctx, ActionActor actor, ActionTypeDefinition type,
+                                     Map<String, Object> values, ActionNavigationRead read,
+                                     List<ActionEffectAccess> preceding, Transaction tx) {
+        if (!delegate.allowedNavigation(ctx, actor, type, values, read, preceding, tx)) return false;
+        var created = created(preceding);
+        if (!created.contains(read.source().key())) consent.guardAction(ctx, principal, read.source().key(), tx);
+        for (var target : read.targets()) {
+            if (!created.contains(target.key())) consent.guardAction(ctx, principal, target.key(), tx);
+        }
+        return true;
+    }
+
     private void parameters(RequestContext ctx, Iterable<?> values, Transaction tx) {
         for (Object value : values) {
             if (value instanceof ObjectRecord object) consent.guardAction(ctx, principal, object.key(), tx);

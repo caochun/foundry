@@ -565,11 +565,16 @@ public final class InMemoryStorageProvider implements StorageProvider {
 
         @Override
         public List<LinkRecord> findLinks(String type, EntityKey from, EntityKey to) {
+            return findLinks(type, from, to, false);
+        }
+
+        @Override
+        public List<LinkRecord> findLinks(String type, EntityKey from, EntityKey to, boolean includeDeleted) {
             assertOpen();
             requireLinkType(type);
             if (from == null && to == null) throw new IllegalArgumentException("A relationship endpoint is required");
             return working.links.values().stream()
-                    .filter(link -> link.tenantId().equals(context.tenantId()) && link.type().equals(type) && !link.isDeleted())
+                    .filter(link -> link.tenantId().equals(context.tenantId()) && link.type().equals(type) && (includeDeleted || !link.isDeleted()))
                     .filter(link -> from == null || link.from().equals(from))
                     .filter(link -> to == null || link.to().equals(to))
                     .sorted(Comparator.comparing(LinkRecord::id)).toList();

@@ -57,6 +57,12 @@ public interface ActionAuthorizer {
         return allowed(context, actor, definition, parameters, transaction);
     }
 
+    default boolean allowedNavigation(RequestContext context, ActionActor actor, ActionTypeDefinition definition,
+                                      Map<String, Object> parameters, ActionNavigationRead read,
+                                      java.util.List<ActionEffectAccess> preceding, org.openfoundry.foundation.spi.Transaction transaction) {
+        return allowed(context, actor, definition, parameters, transaction);
+    }
+
     static ActionAuthorizer denyAll() {
         return (context, actor, definition, parameters) -> false;
     }

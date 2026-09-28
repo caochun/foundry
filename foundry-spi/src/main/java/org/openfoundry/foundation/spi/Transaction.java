@@ -72,6 +72,12 @@ public interface Transaction extends AutoCloseable {
         throw new UnsupportedOperationException("Transactional relationship selection is not supported");
     }
 
+    /** Current relationship assertions, optionally including terminated identities; not a temporal snapshot query. */
+    default java.util.List<LinkRecord> findLinks(String type, EntityKey from, EntityKey to, boolean includeDeleted) {
+        if (includeDeleted) throw new UnsupportedOperationException("Transactional relationship history selection is not supported");
+        return findLinks(type, from, to);
+    }
+
     default CommandReceipt getCommandReceipt(String key) {
         throw new UnsupportedOperationException("Transactional command receipts are not supported");
     }
