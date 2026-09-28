@@ -29,6 +29,7 @@ public final class JdbcConsentStore implements ConsentStore {
         catch (SQLException failure) { throw new IllegalStateException("Cannot read consent", failure); }
     }
     @Override public ConsentSnapshot snapshot(RequestContext context, EntityKey subject, Transaction transaction) {
+        if (transaction != null && !context.equals(transaction.context())) throw new SecurityException("Consent context must match the enclosing transaction");
         if (transaction == null) return snapshot(context, subject);
         if (!initialized) throw new IllegalStateException("Initialize consent storage before starting ontology transactions");
         if (!(transaction instanceof JdbcTransactionAccess access) || access.transactionDataSource() != data) {
@@ -68,23 +69,63 @@ public final class JdbcConsentStore implements ConsentStore {
         // Validate before allocating persistent metadata.
         new ConsentRecord(subject, purpose, decision, 1, clock.instant(), context.actorId(), evidence);
         prepareSubject(context, subject);
-        return transaction(connection -> {
-            long revision = lock(connection, context, subject) + 1;
-            var record = new ConsentRecord(subject, purpose, decision, revision, clock.instant(), context.actorId(), evidence);
-            try (var statement = connection.prepareStatement("""
-                    INSERT INTO of_consent_records (tenant_id, subject_type, subject_id, record_seq, purpose, decision, recorded_at, recorded_by, evidence)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """)) {
-                subject(statement, context, subject);
-                statement.setLong(4, revision); statement.setString(5, purpose); statement.setString(6, decision.name());
-                statement.setString(7, record.recordedAt().toString()); statement.setString(8, context.actorId()); statement.setString(9, evidence);
-                statement.executeUpdate();
-            }
-            advance(connection, context, subject, revision, null);
-            var detail = new LinkedHashMap<String, Object>(); detail.put("decision", decision.name()); detail.put("evidence", evidence);
-            audit(connection, context, subject, purpose, "RECORD", "SUCCESS", detail);
-            return record;
-        });
+        return transaction(connection -> append(connection, context, subject, purpose, decision, evidence, null));
+    }
+    @Override public void prepareTransaction(RequestContext context, EntityKey subject, Transaction transaction) {
+        if (!initialized || !(transaction instanceof JdbcTransactionAccess access) || access.transactionDataSource() != data) {
+            throw new IllegalStateException("Transactional consent requires an initialized store and the same JDBC DataSource");
+        }
+        if (!context.equals(transaction.context())) throw new SecurityException("Consent context must match the enclosing transaction");
+        try { ensureSubjectInTransaction(access.transactionConnection(), context, subject); lock(access.transactionConnection(), context, subject); }
+        catch (SQLException failure) { throw new IllegalStateException("Cannot enlist consent subject", failure); }
+    }
+    @Override public ConsentRecord record(RequestContext context, EntityKey subject, String purpose, ConsentRecord.Decision decision, String evidence, Transaction transaction) {
+        return transactionalRecord(context, subject, purpose, decision, evidence, null, transaction);
+    }
+    @Override public ConsentRecord restore(RequestContext context, EntityKey subject, String purpose, ConsentRecord.Decision decision, String evidence, long expectedRevision, Transaction transaction) {
+        return transactionalRecord(context, subject, purpose, decision, evidence, expectedRevision, transaction);
+    }
+    private ConsentRecord transactionalRecord(RequestContext context, EntityKey subject, String purpose, ConsentRecord.Decision decision, String evidence, Long expectedRevision, Transaction transaction) {
+        requireActor(context);
+        new ConsentRecord(subject, purpose, decision, 1, clock.instant(), context.actorId(), evidence);
+        if (!initialized || !(transaction instanceof JdbcTransactionAccess access) || access.transactionDataSource() != data) {
+            throw new IllegalStateException("Transactional consent requires an initialized store and the same JDBC DataSource");
+        }
+        if (!context.equals(transaction.context())) throw new SecurityException("Consent context must match the enclosing transaction");
+        try {
+            var connection = access.transactionConnection();
+            ensureSubjectInTransaction(connection, context, subject);
+            return append(connection, context, subject, purpose, decision, evidence, expectedRevision);
+        } catch (SQLException failure) { throw new IllegalStateException("Transactional consent failed", failure); }
+    }
+    private void ensureSubjectInTransaction(Connection connection, RequestContext context, EntityKey subject) throws SQLException {
+        if (exists(connection, context, subject)) return;
+        var savepoint = connection.setSavepoint();
+        try (var statement = connection.prepareStatement("INSERT INTO of_consent_subjects (tenant_id, subject_type, subject_id, revision, opted_out) VALUES (?, ?, ?, 0, FALSE)")) {
+            subject(statement, context, subject); statement.executeUpdate();
+        } catch (SQLException conflict) {
+            connection.rollback(savepoint);
+            if (conflict.getSQLState() == null || !conflict.getSQLState().startsWith("23") || !exists(connection, context, subject)) throw conflict;
+        } finally { connection.releaseSavepoint(savepoint); }
+    }
+    private ConsentRecord append(Connection connection, RequestContext context, EntityKey subject, String purpose, ConsentRecord.Decision decision, String evidence, Long expectedRevision) throws SQLException {
+        long previous = lock(connection, context, subject);
+        if (expectedRevision != null && previous != expectedRevision) throw new IllegalStateException("Consent compensation version conflict");
+        long revision = previous + 1;
+        var record = new ConsentRecord(subject, purpose, decision, revision, clock.instant(), context.actorId(), evidence);
+        try (var statement = connection.prepareStatement("""
+                INSERT INTO of_consent_records (tenant_id, subject_type, subject_id, record_seq, purpose, decision, recorded_at, recorded_by, evidence)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            subject(statement, context, subject);
+            statement.setLong(4, revision); statement.setString(5, purpose); statement.setString(6, decision.name());
+            statement.setString(7, record.recordedAt().toString()); statement.setString(8, context.actorId()); statement.setString(9, evidence);
+            statement.executeUpdate();
+        }
+        advance(connection, context, subject, revision, null);
+        var detail = new LinkedHashMap<String, Object>(); detail.put("decision", decision.name()); detail.put("evidence", evidence);
+        audit(connection, context, subject, purpose, "RECORD", "SUCCESS", detail);
+        return record;
     }
     @Override public void setOptOut(RequestContext context, EntityKey subject, boolean optedOut, String reason) {
         requireActor(context);

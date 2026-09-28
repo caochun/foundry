@@ -7,6 +7,14 @@ import java.time.Instant;
 public interface Transaction extends AutoCloseable {
     String transactionId();
 
+    default RequestContext context() { throw new UnsupportedOperationException("Transaction identity is not exposed"); }
+
+    default TransactionResource resource(Object key) { return null; }
+
+    default <T extends TransactionResource> T enlist(Object key, java.util.function.Supplier<T> factory) {
+        throw new UnsupportedOperationException("This transaction does not support in-memory commit participants");
+    }
+
     ObjectRecord createObject(String type, String id, Map<String, Object> properties);
 
     ObjectRecord updateObject(String type, String id, Map<String, Object> properties,

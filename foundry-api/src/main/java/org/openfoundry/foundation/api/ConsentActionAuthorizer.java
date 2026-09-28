@@ -60,6 +60,10 @@ final class ConsentActionAuthorizer implements ActionAuthorizer {
         effects.forEach(effect -> target(ctx, effect.entity(), created, tx));
         return true;
     }
+    @Override public boolean allowedConsent(RequestContext ctx, ActionActor actor, ActionTypeDefinition type, Map<String, Object> values,
+                                            EntityKey subject, String purpose, Transaction tx) {
+        return delegate.allowedConsent(ctx, actor, type, values, subject, purpose, tx);
+    }
     private void parameters(RequestContext ctx, Iterable<?> values, Transaction tx) {
         for (Object value : values) {
             if (value instanceof ObjectRecord object) consent.guardAction(ctx, principal, object.key(), tx);

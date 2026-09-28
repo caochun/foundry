@@ -14,6 +14,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -26,6 +27,7 @@ public final class ActionExecutor {
     private final java.time.Clock clock;
     private final java.time.Duration lease;
     private final org.openfoundry.foundation.spi.schema.OntologySchema parameterSchema;
+    private final ConsentEffects consent;
 
     public ActionExecutor() {
         this(new CelExpressionEvaluator(), null);
@@ -40,12 +42,13 @@ public final class ActionExecutor {
     }
 
     public ActionExecutor(ExpressionEvaluator evaluator, IdempotencyStore idempotencyStore, ActionAuthorizer authorizer) {
-        this(evaluator, idempotencyStore, authorizer, null, java.time.Clock.systemUTC(), java.time.Duration.ofMinutes(1), null);
+        this(evaluator, idempotencyStore, authorizer, null, java.time.Clock.systemUTC(), java.time.Duration.ofMinutes(1), null, null);
     }
 
     private ActionExecutor(ExpressionEvaluator evaluator, IdempotencyStore idempotencyStore, ActionAuthorizer authorizer,
                            SideEffectHandler sideEffects, java.time.Clock clock, java.time.Duration lease,
-                           org.openfoundry.foundation.spi.schema.OntologySchema parameterSchema) {
+                           org.openfoundry.foundation.spi.schema.OntologySchema parameterSchema, ConsentEffects consent) {
+        this.consent = consent;
         this.parameterSchema = parameterSchema;
         this.sideEffects = sideEffects;
         this.clock = java.util.Objects.requireNonNull(clock);
@@ -58,12 +61,22 @@ public final class ActionExecutor {
 
     /** Only trusted application wiring may supply policies; no HTTP request can provide one. */
     public ActionExecutor withAuthorization(ActionAuthorizer policy) {
-        return new ActionExecutor(evaluator, idempotencyStore, policy, sideEffects, clock, lease, parameterSchema);
+        return new ActionExecutor(evaluator, idempotencyStore, policy, sideEffects, clock, lease, parameterSchema, consent);
     }
 
     public ActionExecutor withParameterSchema(org.openfoundry.foundation.spi.schema.OntologySchema schema) {
         org.openfoundry.foundation.spi.schema.PropertyValues.requireSchema(schema);
-        return new ActionExecutor(evaluator, idempotencyStore, authorizer, sideEffects, clock, lease, schema);
+        return new ActionExecutor(evaluator, idempotencyStore, authorizer, sideEffects, clock, lease, schema, consent);
+    }
+
+    public ActionExecutor withConsentStore(org.openfoundry.foundation.spi.ConsentStore store, String defaultPurpose, java.util.Set<String> types, java.util.Set<String> purposes) {
+        return new ActionExecutor(evaluator, idempotencyStore, authorizer, sideEffects, clock, lease, parameterSchema, new ConsentEffects(store, defaultPurpose, types, purposes));
+    }
+
+    private ActionManifest configured(ActionManifest manifest) {
+        if (!ConsentEffects.present(manifest)) return manifest;
+        if (consent == null) throw new IllegalStateException("recordConsent requires a configured transactional consent store");
+        return consent.configured(manifest);
     }
 
     public ActionExecutor withSideEffects(SideEffectHandler handler) {
@@ -71,12 +84,12 @@ public final class ActionExecutor {
     }
 
     public ActionExecutor withSideEffects(SideEffectHandler handler, java.time.Clock clock, java.time.Duration lease) {
-        return new ActionExecutor(evaluator, idempotencyStore, authorizer, java.util.Objects.requireNonNull(handler), clock, lease, parameterSchema);
+        return new ActionExecutor(evaluator, idempotencyStore, authorizer, java.util.Objects.requireNonNull(handler), clock, lease, parameterSchema, consent);
     }
 
     public ActionResult resume(ActionManifest manifest, ActionTypeDefinition definition, String actionId,
                                RequestContext context, ActionActor actor, StorageProvider storage) {
-        return new SideEffectRuntime(sideEffects, authorizer, clock, lease).resume(manifest, definition, actionId, context, actor, storage);
+        return new SideEffectRuntime(sideEffects, authorizer, clock, lease, consent).resume(configured(manifest), definition, actionId, context, actor, storage);
     }
 
     public List<ActionResult> resumePending(Map<String, ActionManifest> manifests, Map<String, ActionTypeDefinition> definitions,
@@ -108,6 +121,11 @@ public final class ActionExecutor {
                                 RequestContext context, ActionActor actor,
                                 Map<String, Object> parameters, String idempotencyKey,
                                 StorageProvider storage) {
+        return executeConfigured(configured(manifest), definition, context, actor, parameters, idempotencyKey, storage);
+    }
+
+    private ActionResult executeConfigured(ActionManifest manifest, ActionTypeDefinition definition, RequestContext context,
+                                           ActionActor actor, Map<String, Object> parameters, String idempotencyKey, StorageProvider storage) {
         if (manifest.reversible()) throw new IllegalArgumentException("Reversible Actions are not supported yet");
         if (definition == null || definition.permission() == null || !manifest.action().equals(definition.name())
                 || context.actorId() == null || !context.actorId().equals(actor.id())) {
@@ -172,12 +190,18 @@ public final class ActionExecutor {
                         committed = decodeResult(receipt.result());
                         if (receipt.result().containsKey("access")) access = ActionEffectAccess.decode(receipt.result().get("access"));
                     }
+                    if (ConsentEffects.present(manifest)) {
+                        Object consentJournal = receipt.result().get("consent");
+                        if (((Number) format).intValue() == 2) consentJournal = transaction.getActionExecution(committed.actionId()).state().get("consent");
+                        consent.authorizeJournal(manifest, consentJournal, context, actor, definition, resolved, authorizer, transaction);
+                    }
                     if (access == null) requireChanges(context, actor, definition, resolved, committed.affected(), transaction);
                     else if (!authorizer.allowedReplay(context, actor, definition, resolved, access, transaction)) throw new SecurityException("Action replay denied");
                 } else {
                     parameters.forEach((name, value) -> checkReferenceVersions(value, resolved.get(name)));
                     var access = new ArrayList<ActionEffectAccess>();
-                    committed = applyEffects(manifest, definition, context, actor, resolved, storage, transaction, true, access);
+                    var consentJournal = new ArrayList<Map<String, Object>>();
+                    committed = applyEffects(manifest, definition, context, actor, resolved, storage, transaction, true, access, consentJournal);
                     if (!committed.success()) return committed;
                     if (key != null) {
                         Map<String, Object> result = manifest.sideEffects().isEmpty()
@@ -185,6 +209,10 @@ public final class ActionExecutor {
                                         .map(entity -> Map.of("type", entity.type(), "id", entity.id())).toList(),
                                         "access", access.stream().map(ActionEffectAccess::encode).toList())
                                 : Map.of("format", 2, "actionId", committed.actionId());
+                        if (ConsentEffects.present(manifest) && manifest.sideEffects().isEmpty()) {
+                            result = new LinkedHashMap<>(result);
+                            result.put("consent", consentJournal);
+                        }
                         transaction.putCommandReceipt(new org.openfoundry.foundation.spi.CommandReceipt(key, actor.id(), manifest.action(), fingerprint, result));
                     }
                     transaction.commit();
@@ -238,7 +266,7 @@ public final class ActionExecutor {
     private ActionResult executeEffects(ActionManifest manifest, ActionTypeDefinition definition, RequestContext context, ActionActor actor,
                                         Map<String, Object> parameters, StorageProvider storage) {
         try (Transaction transaction = storage.beginTransaction(context)) {
-            ActionResult result = applyEffects(manifest, definition, context, actor, parameters, storage, transaction, false, new ArrayList<>());
+            ActionResult result = applyEffects(manifest, definition, context, actor, parameters, storage, transaction, false, new ArrayList<>(), new ArrayList<>());
             if (result.success()) transaction.commit();
             return result;
         }
@@ -246,7 +274,7 @@ public final class ActionExecutor {
 
     private ActionResult applyEffects(ActionManifest manifest, ActionTypeDefinition definition, RequestContext context, ActionActor actor,
                                       Map<String, Object> parameters, StorageProvider storage, Transaction transaction,
-                                      boolean transactional, List<ActionEffectAccess> access) {
+                                      boolean transactional, List<ActionEffectAccess> access, List<Map<String, Object>> consentJournal) {
         String actionId = "act_" + UUID.randomUUID();
         Instant now = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
         var expressions = new ActionValues(parameters, actor, now);
@@ -259,7 +287,15 @@ public final class ActionExecutor {
 
         List<EntityKey> affected = new ArrayList<>();
         var journal = new ArrayList<Map<String, Object>>();
-        for (ActionManifest.ActionEffect effect : manifest.effects()) {
+        var pendingConsent = new ArrayList<ConsentEffects.Pending>();
+        for (int effectIndex = 0; effectIndex < manifest.effects().size(); effectIndex++) {
+            ActionManifest.ActionEffect effect = manifest.effects().get(effectIndex);
+            if (effect instanceof ActionManifest.RecordConsent record) {
+                boolean apply = record.condition() == null || evaluator.evaluateBindings(record.condition(), parameters, expressions.createdBindings(), actor, now);
+                if (apply) pendingConsent.add(new ConsentEffects.Pending(record, expressions.consentSubject(record.subject(), record.subjectType(), consent.fallbackType()), effectIndex));
+                else consentJournal.add(Map.of("effect", effectIndex, "applied", false));
+                continue;
+            }
             if (effect instanceof ActionManifest.UpdateObject update) {
                 ObjectRecord target = expressions.object(update.target());
                 if (transactional) target = transaction.getObject(target.type(), target.id());
@@ -304,10 +340,14 @@ public final class ActionExecutor {
         if (!authorizer.allowedEffects(context, actor, definition, parameters, access, transaction)) {
             throw new SecurityException("Action effects denied");
         }
+        for (var pending : pendingConsent) consentJournal.add(consent.apply(pending, context, actor, definition, parameters, authorizer, transaction));
+        consentJournal.sort(java.util.Comparator.comparingInt(entry -> ((Number) entry.get("effect")).intValue()));
         boolean continued = !manifest.sideEffects().isEmpty();
         if (continued) {
+            var state = ActionContinuationState.initial(manifest, definition, parameters, expressions, affected, journal, now, transaction.transactionId());
+            if (ConsentEffects.present(manifest)) state.put("consent", consentJournal);
             transaction.putActionExecution(new org.openfoundry.foundation.spi.ActionExecution(actionId, actor.id(), manifest.action(), 1,
-                    "PENDING", now, ActionContinuationState.initial(manifest, definition, parameters, expressions, affected, journal, now, transaction.transactionId())), 0);
+                    "PENDING", now, state), 0);
         }
         Map<String, Object> detail = Map.of(
                 "action", manifest.action(),

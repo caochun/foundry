@@ -39,6 +39,7 @@ public final class ActionManifestParser {
                 case "updateObject" -> java.util.Set.of("type", "target", "set");
                 case "createObject" -> java.util.Set.of("type", "objectType", "target", "properties");
                 case "createLink" -> java.util.Set.of("type", "linkType", "from", "to", "properties");
+                case "recordConsent" -> java.util.Set.of("type", "subject", "subjectType", "purpose", "decision", "evidence", "condition");
                 case "deleteLink" -> java.util.Set.of("type", "linkType", "linkId", "filter", "expect");
                 default -> throw new ActionParseException("unsupported effect type: " + type);
             });
@@ -46,6 +47,7 @@ public final class ActionManifestParser {
                 case "updateObject" -> new ActionManifest.UpdateObject(string(value, "target"), stringMap(value.get("set")));
                 case "createObject" -> new ActionManifest.CreateObject(string(value, "objectType"), value.containsKey("target") ? string(value, "target") : null, stringMap(value.get("properties")));
                 case "createLink" -> new ActionManifest.CreateLink(string(value, "linkType"), string(value, "from"), string(value, "to"), stringMap(value.get("properties")));
+                case "recordConsent" -> consent(value);
                 case "deleteLink" -> deleteLink(value);
                 default -> throw new ActionParseException("unsupported effect type: " + type);
             });
@@ -85,6 +87,20 @@ public final class ActionManifestParser {
         }
         return new ActionManifest(action, version, reversible, preconditions, effects, policy, sideEffects);
     }
+
+    private static ActionManifest.RecordConsent consent(Map<String, Object> value) {
+        try {
+            return new ActionManifest.RecordConsent(string(value, "subject"), optional(value, "subjectType"), optional(value, "purpose"),
+                    value.containsKey("decision") ? org.openfoundry.foundation.spi.ConsentRecord.Decision.valueOf(string(value, "decision")) : org.openfoundry.foundation.spi.ConsentRecord.Decision.GRANT,
+                    evidence(value), optional(value, "condition"));
+        } catch (IllegalArgumentException invalid) { throw new ActionParseException("Invalid recordConsent effect: " + invalid.getMessage()); }
+    }
+    private static String evidence(Map<String, Object> values) {
+        if (!values.containsKey("evidence")) return null;
+        if (!(values.get("evidence") instanceof String text)) throw new ActionParseException("evidence must be a string");
+        return text;
+    }
+    private static String optional(Map<String, Object> values, String key) { return values.containsKey(key) ? string(values, key) : null; }
 
     private static ActionManifest.DeleteLink deleteLink(Map<String, Object> value) {
         boolean direct = value.containsKey("linkId");

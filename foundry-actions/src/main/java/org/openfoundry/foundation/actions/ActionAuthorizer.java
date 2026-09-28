@@ -50,6 +50,13 @@ public interface ActionAuthorizer {
         return allowedChanges(context, actor, definition, parameters, effects.stream().map(ActionEffectAccess::entity).toList(), transaction);
     }
 
+    /** The registered Action permission is the authority to publish its declared consent effect. */
+    default boolean allowedConsent(RequestContext context, ActionActor actor, ActionTypeDefinition definition,
+                                   Map<String, Object> parameters, org.openfoundry.foundation.spi.EntityKey subject, String purpose,
+                                   org.openfoundry.foundation.spi.Transaction transaction) {
+        return allowed(context, actor, definition, parameters, transaction);
+    }
+
     static ActionAuthorizer denyAll() {
         return (context, actor, definition, parameters) -> false;
     }

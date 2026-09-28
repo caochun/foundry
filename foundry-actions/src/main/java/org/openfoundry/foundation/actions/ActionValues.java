@@ -43,6 +43,22 @@ final class ActionValues {
         throw new IllegalArgumentException("Action endpoint must resolve to an object");
     }
 
+    Map<String, Object> createdBindings() { return Collections.unmodifiableMap(created); }
+
+    EntityKey consentSubject(String expression, String subjectType, String fallbackType) {
+        Object value = reference(expression);
+        EntityKey key;
+        if (value instanceof ObjectRecord object) key = object.key();
+        else if (value instanceof EntityKey entity) key = entity;
+        else if (value instanceof String id && !id.isBlank()) {
+            String type = subjectType == null ? fallbackType : subjectType;
+            if (type == null) throw new IllegalArgumentException("Consent subject type is ambiguous");
+            key = new EntityKey(type, id);
+        } else throw new IllegalArgumentException("Consent subject did not resolve to an identity");
+        if (subjectType != null && !subjectType.equals(key.type())) throw new IllegalArgumentException("Consent subject type mismatch");
+        return key;
+    }
+
     Map<String, Object> properties(Map<String, String> expressions) {
         var values = new LinkedHashMap<String, Object>();
         expressions.forEach((name, expression) -> values.put(name, value(expression)));

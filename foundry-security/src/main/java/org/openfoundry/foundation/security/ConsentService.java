@@ -15,6 +15,8 @@ public final class ConsentService {
         this.configuration = Objects.requireNonNull(configuration);
         store.initialize();
     }
+    /** Trusted action wiring; not exposed by consent management HTTP endpoints. */
+    public ConsentStore store() { return store; }
     public ConsentConfiguration configuration() { return configuration; }
     public boolean applies(EntityKey subject) { return configuration.subjectTypes().contains(subject.type()); }
 

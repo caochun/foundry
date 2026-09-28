@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -290,6 +291,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
         private final String transactionId = UUID.randomUUID().toString();
         private boolean closed;
         private final UniquePropertyIndex uniqueProperties = new UniquePropertyIndex();
+        private final Map<Object, org.openfoundry.foundation.spi.TransactionResource> resources = new LinkedHashMap<>();
         private final OntologySchema schema = InMemoryStorageProvider.this.schema;
         private final String transactionSchemaId = schemaId;
 
@@ -323,6 +325,14 @@ public final class InMemoryStorageProvider implements StorageProvider {
                     .filter(candidate -> candidate.name().equals(type))
                     .findFirst()
                     .orElseThrow(() -> new IllegalArgumentException("unknown link type: " + type));
+        }
+
+        @Override public RequestContext context() { return context; }
+        @Override public org.openfoundry.foundation.spi.TransactionResource resource(Object key) { return resources.get(key); }
+        @Override @SuppressWarnings("unchecked")
+        public <T extends org.openfoundry.foundation.spi.TransactionResource> T enlist(Object key, java.util.function.Supplier<T> factory) {
+            assertOpen();
+            return (T) resources.computeIfAbsent(key, ignored -> factory.get());
         }
 
         @Override
@@ -635,21 +645,35 @@ public final class InMemoryStorageProvider implements StorageProvider {
             assertOpen();
             synchronized (monitor) {
                 assertOpen();
-                if (revision != baseRevision) {
-                    throw new org.openfoundry.foundation.spi.TransactionConflictException("transaction conflict: storage changed during transaction");
+                if (revision != baseRevision) throw new org.openfoundry.foundation.spi.TransactionConflictException("transaction conflict: storage changed during transaction");
+                try {
+                    resources.values().forEach(org.openfoundry.foundation.spi.TransactionResource::prepare);
+                    resources.values().forEach(org.openfoundry.foundation.spi.TransactionResource::publish);
+                    state = working;
+                    revision++;
+                    closed = true;
+                } catch (RuntimeException | Error failure) {
+                    resources.values().forEach(org.openfoundry.foundation.spi.TransactionResource::rollback);
+                    closed = true;
+                    throw failure;
+                } finally {
+                    if (closed) releaseResources();
                 }
-                state = working;
-                revision++;
             }
-            closed = true;
         }
 
         @Override
         public void rollback() {
             if (!closed) {
                 closed = true;
-                working = null;
+                try { resources.values().forEach(org.openfoundry.foundation.spi.TransactionResource::rollback); }
+                finally { working = null; releaseResources(); }
             }
+        }
+
+        private void releaseResources() {
+            for (var resource : resources.values()) resource.close();
+            resources.clear();
         }
 
         @Override

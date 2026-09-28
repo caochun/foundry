@@ -45,7 +45,7 @@ public record ActionManifest(String action, int version, boolean reversible,
         }
     }
 
-    public sealed interface ActionEffect permits UpdateObject, CreateObject, CreateLink, DeleteLink {}
+    public sealed interface ActionEffect permits UpdateObject, CreateObject, CreateLink, DeleteLink, RecordConsent {}
 
     public record UpdateObject(String target, Map<String, String> set) implements ActionEffect {
         public UpdateObject {
@@ -67,6 +67,17 @@ public record ActionManifest(String action, int version, boolean reversible,
             if (linkType == null || linkType.isBlank()) throw new IllegalArgumentException("linkType must not be blank");
             if (from == null || from.isBlank() || to == null || to.isBlank()) throw new IllegalArgumentException("link endpoints must not be blank");
             properties = Map.copyOf(Objects.requireNonNull(properties, "properties must not be null"));
+        }
+    }
+
+    public record RecordConsent(String subject, String subjectType, String purpose, org.openfoundry.foundation.spi.ConsentRecord.Decision decision,
+                                String evidence, String condition) implements ActionEffect {
+        public RecordConsent {
+            if (subject == null || subject.isBlank()) throw new IllegalArgumentException("Consent subject expression is required");
+            if (subjectType != null && subjectType.isBlank() || purpose != null && purpose.isBlank() || condition != null && condition.isBlank()) {
+                throw new IllegalArgumentException("Consent effect declarations must not be blank");
+            }
+            Objects.requireNonNull(decision);
         }
     }
 

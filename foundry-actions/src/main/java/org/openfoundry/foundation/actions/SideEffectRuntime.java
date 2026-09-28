@@ -18,8 +18,10 @@ final class SideEffectRuntime {
     private final ActionAuthorizer authorizer;
     private final Clock clock;
     private final Duration lease;
+    private final ConsentEffects consent;
 
-    SideEffectRuntime(SideEffectHandler handler, ActionAuthorizer authorizer, Clock clock, Duration lease) {
+    SideEffectRuntime(SideEffectHandler handler, ActionAuthorizer authorizer, Clock clock, Duration lease, ConsentEffects consent) {
+        this.consent = consent;
         this.handler = handler;
         this.authorizer = authorizer;
         this.clock = clock;
@@ -130,6 +132,7 @@ final class SideEffectRuntime {
                 if (!run.status().equals("COMPENSATING")) return run;
                 attemptedVersion[0] = run.version();
                 var state = ActionContinuationState.mutable(run);
+                if (ConsentEffects.present(manifest)) consent.compensate(manifest, state.get("consent"), id, context, tx);
                 var journal = ActionContinuationState.maps(state.get("journal"));
                 var checked = new HashSet<EntityKey>();
                 for (int i = journal.size() - 1; i >= 0; i--) {
@@ -184,6 +187,10 @@ final class SideEffectRuntime {
             throw new IllegalArgumentException("Continuation configuration changed");
         }
         var parameters = ActionContinuationState.parameters(run.state(), transaction);
+        if (ConsentEffects.present(manifest)) {
+            if (consent == null) throw new IllegalStateException("Consent continuation store is not configured");
+            consent.authorizeJournal(manifest, run.state().get("consent"), context, actor, definition, parameters, authorizer, transaction);
+        }
         if (!authorizer.allowed(context, actor, definition, parameters, transaction)
                 || !authorizer.allowedReplay(context, actor, definition, parameters, ActionEffectAccess.decode(run.state().get("journal")), transaction)) {
             throw new SecurityException("Continuation denied");

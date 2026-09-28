@@ -2,6 +2,8 @@
 
 日期：2026-09-28。状态：记录/opt-out、用途策略、读与动作检查、管理API和审计已实现；事务recordConsent effect及实时撤销影响管理待完成。
 
+后续进展：recordConsent effect及事务/补偿已由 [ADR-0026](0026-transactional-consent-effects.md) 接续完成；下文为本阶段的历史边界。
+
 ## 上游证据与领域边界
 
 固定上游v0.3.0 / 1d7e1aa的`packages/spi/src/consent.ts`将DataPurpose定义为开放字符串，医疗常量只是预设。`packages/security/src/consent`实现同意记录、关系豁免、列表排除和动作拒绝；`packages/storage-postgres/src/consent`提供持久存储；`packages/api/src/consent/router.ts`提供记录者角色门禁及写入/拒绝审计。

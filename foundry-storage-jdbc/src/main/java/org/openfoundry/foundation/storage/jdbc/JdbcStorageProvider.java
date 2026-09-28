@@ -655,6 +655,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
                     .orElseThrow(() -> new IllegalArgumentException("unknown link type: " + type));
         }
 
+        @Override public RequestContext context() { return context; }
         @Override public DataSource transactionDataSource() { return dataSource; }
         @Override public Connection transactionConnection() { assertOpen(); return connection; }
 

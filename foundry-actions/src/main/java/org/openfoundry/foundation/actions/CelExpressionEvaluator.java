@@ -30,9 +30,16 @@ public final class CelExpressionEvaluator implements ExpressionEvaluator {
 
     @Override
     public boolean evaluate(String expression, Map<String, Object> parameters, ActionActor actor, java.time.Instant now) {
+        return evaluateBindings(expression, parameters, Map.of(), actor, now);
+    }
+
+    @Override
+    public boolean evaluateBindings(String expression, Map<String, Object> parameters, Map<String, Object> bindings, ActionActor actor, java.time.Instant now) {
+        var roots = new java.util.LinkedHashMap<>(parameters);
+        bindings.forEach(roots::putIfAbsent);
         String normalized = normalize(expression);
-        String cacheKey = normalized + "|" + parameters.keySet().stream().sorted().toList();
-        Program program = programs.computeIfAbsent(cacheKey, ignored -> compile(normalized, parameters.keySet()));
+        String cacheKey = normalized + "|" + roots.keySet().stream().sorted().toList();
+        Program program = programs.computeIfAbsent(cacheKey, ignored -> compile(normalized, roots.keySet()));
         Map<String, Object> activation = new HashMap<>();
         Map<String, Object> actorValue = new HashMap<>();
         actorValue.put("id", actor.id());
@@ -41,7 +48,7 @@ public final class CelExpressionEvaluator implements ExpressionEvaluator {
         Map<String, Object> resolved = new HashMap<>();
         parameters.forEach((name, value) -> resolved.put(name, celValue(value)));
         activation.put("params", resolved);
-        activation.putAll(resolved);
+        roots.forEach((name, value) -> activation.put(name, celValue(value)));
         activation.put("now", now);
         return program.eval(activation).getVal().booleanValue();
     }

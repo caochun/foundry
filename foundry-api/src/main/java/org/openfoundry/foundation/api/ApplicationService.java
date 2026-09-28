@@ -77,7 +77,9 @@ public final class ApplicationService {
         }
         this.storage = SchemaBoundStorage.bind(Objects.requireNonNull(storage), schema);
         this.authorization = Objects.requireNonNull(authorization);
-        this.actions = schema == null ? Objects.requireNonNull(actions) : Objects.requireNonNull(actions).withParameterSchema(schema);
+        var executor = schema == null ? Objects.requireNonNull(actions) : Objects.requireNonNull(actions).withParameterSchema(schema);
+        if (consent != null) executor = executor.withConsentStore(consent.store(), consent.configuration().purpose(), consent.configuration().subjectTypes(), consent.configuration().recordablePurposes());
+        this.actions = executor;
         this.enumTypes = schema == null ? Set.of() : Set.copyOf(schema.enums().keySet());
         this.manifests = Map.copyOf(manifests);
         this.fieldPolicies = Map.copyOf(fieldPolicies);
