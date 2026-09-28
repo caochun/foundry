@@ -37,6 +37,7 @@ public final class ApplicationService {
     private final ComputedFieldEvaluator computedEvaluator;
     private final Set<String> enumTypes;
     private final OntologySchema schema;
+    private final org.openfoundry.foundation.security.ConsentService consent;
 
     public static ApplicationService fromBundle(StorageProvider storage, AuthorizationService authorization, ActionExecutor actions,
                                                  org.openfoundry.foundation.pack.LoadedPackBundle bundle, AuthorizationMode mode) {
@@ -56,11 +57,21 @@ public final class ApplicationService {
     public ApplicationService(StorageProvider storage, AuthorizationService authorization, ActionExecutor actions,
                               OntologySchema schema, Map<String, ActionManifest> manifests, Map<String, FieldPolicy> fieldPolicies,
                               AuthorizationMode authorizationMode) {
+        this(storage, authorization, actions, schema, manifests, fieldPolicies, authorizationMode, null);
+    }
+
+    public ApplicationService(StorageProvider storage, AuthorizationService authorization, ActionExecutor actions,
+                              OntologySchema schema, Map<String, ActionManifest> manifests, Map<String, FieldPolicy> fieldPolicies,
+                              AuthorizationMode authorizationMode, org.openfoundry.foundation.security.ConsentService consent) {
+        this.consent = consent;
         this.schema = schema;
         this.authorizationMode = Objects.requireNonNull(authorizationMode);
         if (authorizationMode == AuthorizationMode.ONTOLOGY_TARGETS && schema == null) throw new IllegalArgumentException("Ontology authorization requires a schema");
         this.objectTypes = schema == null ? Set.of() : schema.objectTypes().stream()
                 .map(org.openfoundry.foundation.spi.schema.ObjectTypeDefinition::name).collect(Collectors.toUnmodifiableSet());
+        if (consent != null && (schema == null || !objectTypes.containsAll(consent.configuration().subjectTypes()))) {
+            throw new IllegalArgumentException("Consent subjects must be registered concrete object types");
+        }
         if (authorizationMode == AuthorizationMode.ONTOLOGY_TARGETS && objectTypes.contains("ActionType")) {
             throw new IllegalArgumentException("ActionType is reserved for object-less action authorization");
         }
@@ -111,11 +122,19 @@ public final class ApplicationService {
     }
 
     public ObjectRecord getObject(RequestContext context, SecurityPrincipal principal, String type, String id) {
+        var result = readObject(context, principal, type, id);
+        return result == null ? null : result.object();
+    }
+
+    public ObjectReadResult readObject(RequestContext context, SecurityPrincipal principal, String type, String id) {
         requireContext(context, principal);
         return storage.read(context, () -> {
-            if (!authorization.check(context, principal, "viewer", new EntityKey(type, id))) return null;
+            var key = new EntityKey(type, id);
+            if (!authorization.check(context, principal, "viewer", key)) return null;
             var object = storage.getObject(context, type, id);
-            return object == null || object.isDeleted() ? null : project(context, principal, object, QueryOptions.defaults());
+            if (object == null || object.isDeleted()) return null;
+            if (!consentAllowed(context, principal, key)) return ObjectReadResult.restricted(key);
+            return ObjectReadResult.visible(project(context, principal, object, QueryOptions.defaults()));
         });
     }
 
@@ -125,7 +144,8 @@ public final class ApplicationService {
             if (schema != null) return queryObjects(context, principal, type, ObjectQuery.all(options)).items();
             // Metadata-only legacy callers still paginate after permission filtering.
             var rows = storage.queryObjects(context, type, allRows(options)).stream()
-                    .filter(object -> authorization.check(context, principal, "viewer", object.key())).toList();
+                    .filter(object -> authorization.check(context, principal, "viewer", object.key()))
+                    .filter(object -> consentAllowed(context, principal, object.key())).toList();
             return rows.stream().skip(options.offset()).limit(options.limit())
                     .map(object -> project(context, principal, object, options)).toList();
         });
@@ -163,6 +183,7 @@ public final class ApplicationService {
         // One storage read supplies both rows and count. SQL pushdown is a separate optimization.
         return storage.queryObjects(context, type, allRows(query.options())).stream()
                 .filter(object -> authorization.check(context, principal, "viewer", object.key()))
+                    .filter(object -> consentAllowed(context, principal, object.key()))
                 .filter(predicate).sorted(comparator).toList();
     }
 
@@ -175,6 +196,7 @@ public final class ApplicationService {
             var predicate = new ObjectQueryPlan(schema, properties.get(type), visible).predicate(query.filter());
             var rows = storage.queryObjects(context, type, query.sourceView()).stream()
                     .filter(object -> authorization.check(context, principal, "viewer", object.key()))
+                    .filter(object -> consentAllowed(context, principal, object.key()))
                     .filter(predicate).toList();
             return aggregation.evaluate(rows);
         });
@@ -190,6 +212,7 @@ public final class ApplicationService {
             var view = query.sourceView();
             var rows = storage.queryObjects(context, type, view).stream()
                     .filter(object -> authorization.check(context, principal, "viewer", object.key()))
+                    .filter(object -> consentAllowed(context, principal, object.key()))
                     .filter(predicate).toList();
             return search.evaluate(rows, object -> project(context, principal, object, view));
         });
@@ -253,7 +276,7 @@ public final class ApplicationService {
         if (authorizationMode == AuthorizationMode.STRICT_RESOURCES
                 && !authorization.check(context, principal, "viewer", new EntityKey(link.type(), link.id()))) return null;
         EntityKey target = field.direction() == StorageProvider.Direction.OUTBOUND ? link.to() : link.from();
-        if (!authorization.check(context, principal, "viewer", target)) return null;
+        if (!authorization.check(context, principal, "viewer", target) || !consentAllowed(context, principal, target)) return null;
         var object = storage.getObject(context, target.type(), target.id());
         if (object == null) return null;
         if (field.targetType().equals(field.linkType())) {
@@ -274,7 +297,7 @@ public final class ApplicationService {
         return storage.read(context, () -> {
             var field = computedFields.getOrDefault(source.type(), List.of()).stream().filter(value -> value.name().equals(name))
                     .findFirst().orElseThrow(() -> new IllegalArgumentException("Unknown computed field"));
-            if (!authorization.check(context, principal, "viewer", source) || !visibleComputedField(principal, source.type(), field)) return null;
+            if (!authorization.check(context, principal, "viewer", source) || !consentAllowed(context, principal, source) || !visibleComputedField(principal, source.type(), field)) return null;
             if (view.asOfValidTime() != null) {
                 if (!TemporalHistory.active(storage.getObjectAtTime(context, source.type(), source.id(), view.asOfValidTime(), view.asOfRecordedTime()))) return null;
             } else {
@@ -291,7 +314,7 @@ public final class ApplicationService {
             if (authorizationMode == AuthorizationMode.STRICT_RESOURCES
                     && !authorization.check(context, principal, "viewer", new EntityKey(link.type(), link.id()))) return false;
             var target = field.direction() == StorageProvider.Direction.INBOUND ? link.from() : link.to();
-            if (!authorization.check(context, principal, "viewer", target)) return false;
+            if (!authorization.check(context, principal, "viewer", target) || !consentAllowed(context, principal, target)) return false;
             if (view.asOfValidTime() != null) {
                 return TemporalHistory.active(storage.getObjectAtTime(context, target.type(), target.id(), view.asOfValidTime(), view.asOfRecordedTime()));
             }
@@ -327,6 +350,11 @@ public final class ApplicationService {
 
     private static Map<String, LinkFieldDefinition> indexLinkFields(List<LinkFieldDefinition> fields) {
         return fields.stream().collect(Collectors.toUnmodifiableMap(LinkFieldDefinition::name, field -> field));
+    }
+
+    org.openfoundry.foundation.security.ConsentService consentService(RequestContext context, SecurityPrincipal principal) {
+        requireCurrentSchema(context, principal);
+        return consent;
     }
 
     void validateObjectSetQuery(RequestContext context, SecurityPrincipal principal, String type, Map<String, Object> filter,
@@ -366,8 +394,13 @@ public final class ApplicationService {
             Object value = parameters.get(parameter.name());
             resolved.put(parameter.name(), resolve(context, parameter.type(), value));
         }
-        return actions.withAuthorization(actionPolicy(principal)).execute(registered, definition, context,
-                new ActionActor(principal.id(), principal.roles()), Collections.unmodifiableMap(resolved), idempotencyKey, storage);
+        try {
+            return actions.withAuthorization(governedActionPolicy(principal)).execute(registered, definition, context,
+                    new ActionActor(principal.id(), principal.roles()), Collections.unmodifiableMap(resolved), idempotencyKey, storage);
+        } catch (org.openfoundry.foundation.security.ConsentDeniedException denied) {
+            consent.auditActionDenial(context, denied, registered.action());
+            throw denied;
+        }
     }
 
     public ActionResult resume(RequestContext context, SecurityPrincipal principal, String actionName, String actionId) {
@@ -378,21 +411,37 @@ public final class ApplicationService {
         if (manifest == null || definition == null) throw new SecurityException("Action continuation denied");
         if (authorizationMode == AuthorizationMode.STRICT_RESOURCES && !authorization.check(context, principal, definition.permission(),
                 new EntityKey("ActionType", definition.name()))) throw new SecurityException("Action continuation denied");
-        return actions.withAuthorization(actionPolicy(principal)).resume(manifest, definition, actionId, context,
-                new ActionActor(principal.id(), principal.roles()), storage);
+        try {
+            return actions.withAuthorization(governedActionPolicy(principal)).resume(manifest, definition, actionId, context,
+                    new ActionActor(principal.id(), principal.roles()), storage);
+        } catch (org.openfoundry.foundation.security.ConsentDeniedException denied) {
+            consent.auditActionDenial(context, denied, actionName);
+            throw denied;
+        }
     }
 
     private OntologyActionAuthorizer ontologyPolicy(SecurityPrincipal principal) {
         return new OntologyActionAuthorizer(authorization, principal, objectTypes, relationTypes);
     }
 
+    private boolean consentAllowed(RequestContext context, SecurityPrincipal principal, EntityKey key) {
+        return consent == null || consent.allowed(context, principal, key);
+    }
+
+    private ActionAuthorizer governedActionPolicy(SecurityPrincipal principal) {
+        var policy = actionPolicy(principal);
+        return consent == null ? policy : new ConsentActionAuthorizer(policy, consent, principal, relationTypes);
+    }
+
     private boolean canViewEntity(RequestContext context, SecurityPrincipal principal, EntityKey key) {
-        if (authorizationMode == AuthorizationMode.ONTOLOGY_TARGETS && relationTypes.contains(key.type())) {
+        if (relationTypes.contains(key.type())) {
             var link = storage.getLink(context, key.type(), key.id());
-            return link != null && authorization.check(context, principal, "viewer", link.from())
-                    && authorization.check(context, principal, "viewer", link.to());
+            if (link == null || !consentAllowed(context, principal, link.from()) || !consentAllowed(context, principal, link.to())) return false;
+            if (authorizationMode == AuthorizationMode.ONTOLOGY_TARGETS) {
+                return authorization.check(context, principal, "viewer", link.from()) && authorization.check(context, principal, "viewer", link.to());
+            }
         }
-        return authorization.check(context, principal, "viewer", key);
+        return authorization.check(context, principal, "viewer", key) && consentAllowed(context, principal, key);
     }
 
     private ActionAuthorizer actionPolicy(SecurityPrincipal principal) {

@@ -67,7 +67,15 @@ public final class JdkRestServer implements AutoCloseable {
         ApiRequestContext context = requestContext.get();
         ApiResponse response;
         String path = exchange.getRequestURI().getPath();
-        if (path.equals("/api/v1/object-sets") || path.startsWith("/api/v1/object-sets/")) {
+        if (path.equals("/api/v1/consent") || path.startsWith("/api/v1/consent/")) {
+            Map<String, Object> body = Map.of();
+            if (exchange.getRequestMethod().equals("POST")) {
+                body = mapper.readValue(exchange.getRequestBody(), new com.fasterxml.jackson.core.type.TypeReference<>() {});
+                if (body == null) throw new IllegalArgumentException("Consent body must be an object");
+            }
+            response = router.consent(context.request(), context.principal(), exchange.getRequestMethod(), path,
+                    parameters(exchange.getRequestURI().getRawQuery()), body);
+        } else if (path.equals("/api/v1/object-sets") || path.startsWith("/api/v1/object-sets/")) {
             Map<String, Object> body = Map.of();
             if (exchange.getRequestMethod().equals("POST") || exchange.getRequestMethod().equals("PUT")) {
                 body = mapper.readValue(exchange.getRequestBody(), new com.fasterxml.jackson.core.type.TypeReference<>() {});

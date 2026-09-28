@@ -25,24 +25,24 @@ public final class GraphqlContractGenerator {
             type.properties().forEach(property -> appendProperty(result, property));
             type.linkFields().forEach(field -> appendLinkField(result, field));
             type.computedFields().forEach(field -> result.append("  ").append(field.name()).append(": ").append(field.type()).append("\n"));
-            result.append("}\n\n");
+            result.append("  _consentRestricted: Boolean\n}\n\n");
         }
         for (ObjectTypeDefinition object : schema.objectTypes()) {
             result.append("type ").append(object.name()).append(implementsTypes(object.interfaces())).append(" {\n");
             object.properties().forEach(property -> appendProperty(result, property));
             object.linkFields().forEach(field -> appendLinkField(result, field));
             object.computedFields().forEach(field -> result.append("  ").append(field.name()).append(": ").append(field.type()).append("\n"));
-            result.append("}\n\n");
+            result.append("  _consentRestricted: Boolean\n}\n\n");
         }
         for (var type : schema.linkTypes()) {
             result.append("type ").append(type.name()).append(implementsTypes(type.interfaces())).append(" {\n");
             type.properties().forEach(property -> appendProperty(result, property));
             type.linkFields().forEach(field -> appendLinkField(result, field));
             type.computedFields().forEach(field -> result.append("  ").append(field.name()).append(": ").append(field.type()).append("\n"));
-            result.append("}\n\n");
+            result.append("  _consentRestricted: Boolean\n}\n\n");
         }
         result.append(GraphqlQueryTypes.sdl(schema));
-        result.append("type Query {\n").append(GraphqlObjectSetTypes.queriesSdl());
+        result.append("type Query {\n").append(GraphqlObjectSetTypes.queriesSdl()).append(GraphqlConsentTypes.queriesSdl());
         for (var object : schema.objectTypes()) {
             result.append("  search").append(object.name()).append("s(query: String!, fields: [String!], filter: ").append(object.name())
                     .append("Filter, mode: SearchMode, first: Int, offset: Int, after: String): SearchResult_").append(object.name()).append("!\n");
@@ -74,7 +74,7 @@ public final class GraphqlContractGenerator {
                     result.append("type ").append(action.name()).append("Result { success: Boolean! actionId: ID! status: String! errors: [ActionError!] affectedObjects: [AffectedObject!] }\n");
                 }
             }
-            result.append("type Mutation {\n").append(GraphqlObjectSetTypes.mutationsSdl());
+            result.append("type Mutation {\n").append(GraphqlObjectSetTypes.mutationsSdl()).append(GraphqlConsentTypes.mutationsSdl());
             for (var action : schema.actionTypes()) {
                 result.append("  ").append(lower(action.name()));
                 if (mode == GraphqlApiRuntime.ActionMode.LEGACY_JSON) result.append("(input: String!): String\n");
@@ -85,7 +85,7 @@ public final class GraphqlContractGenerator {
             }
             result.append("}\n");
         }
-        if (schema.actionTypes().isEmpty()) result.append("type Mutation {\n").append(GraphqlObjectSetTypes.mutationsSdl()).append("}\n");
+        if (schema.actionTypes().isEmpty()) result.append("type Mutation {\n").append(GraphqlObjectSetTypes.mutationsSdl()).append(GraphqlConsentTypes.mutationsSdl()).append("}\n");
         return result.toString();
     }
 

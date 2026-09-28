@@ -22,6 +22,30 @@ public final class RestApiRouter {
         this.objectSets = objectSets == null ? null : new ObjectSetService(application, objectSets);
     }
 
+    public ApiResponse consent(RequestContext context, SecurityPrincipal principal, String method, String path,
+                               Map<String, String> parameters, Map<String, Object> input) {
+        var api = new ConsentApi(application);
+        var request = new ApiRequestContext(context, principal);
+        try {
+            if (method.equals("POST")) {
+                if (!parameters.isEmpty()) throw new IllegalArgumentException("Consent writes do not accept query parameters");
+                return switch (path) {
+                    case "/api/v1/consent" -> ApiResponse.ok(api.record(request, input));
+                    case "/api/v1/consent/revoke" -> ApiResponse.ok(api.revoke(request, input));
+                    case "/api/v1/consent/opt-out" -> ApiResponse.ok(api.optOut(request, input));
+                    default -> ApiResponse.notFound();
+                };
+            }
+            if (method.equals("GET") && (path.equals("/api/v1/consent") || path.equals("/api/v1/consent/audit"))) {
+                return ApiResponse.ok(api.records(request, new java.util.LinkedHashMap<>(parameters), path.endsWith("/audit")));
+            }
+            return ApiResponse.notFound();
+        } catch (ConsentApi.NotConfigured missing) {
+            return new ApiResponse(501, Map.of("code", "CONSENT_NOT_CONFIGURED", "error", "Consent service is not configured"));
+        } catch (SecurityException denied) { return ApiResponse.forbidden(); }
+        catch (IllegalArgumentException invalid) { return ApiResponse.badRequest("Invalid consent request"); }
+    }
+
     public ApiResponse objectSets(RequestContext context, SecurityPrincipal principal, String method, String path,
                                   Map<String, String> parameters, Map<String, Object> input) {
         if (objectSets == null) return new ApiResponse(501, Map.of("code", "OBJECT_SETS_NOT_CONFIGURED", "error", "ObjectSet store is not configured"));
@@ -80,6 +104,8 @@ public final class RestApiRouter {
             return new ApiResponse(404, Map.of("code", "OBJECT_SET_NOT_FOUND", "error", "ObjectSet is not available"));
         } catch (org.openfoundry.foundation.spi.ObjectSetConflictException changed) {
             return new ApiResponse(409, Map.of("code", "OBJECT_SET_CONFLICT", "error", "ObjectSet changed; reload its definition", "retryable", false));
+        } catch (org.openfoundry.foundation.security.ConsentDeniedException denied) {
+            return new ApiResponse(403, Map.of("code", "CONSENT_DENIED", "error", "Consent is not granted for this operation"));
         } catch (SecurityException denied) { return ApiResponse.forbidden(); }
         catch (IllegalArgumentException invalid) { return ApiResponse.badRequest("Invalid ObjectSet request"); }
     }
@@ -95,8 +121,9 @@ public final class RestApiRouter {
         String type = parts[3];
         if (parts.length == 4) return ApiResponse.ok(application.listObjects(context, principal, type, options));
         if (parts.length == 5) {
-            Object value = application.getObject(context, principal, type, parts[4]);
-            return value == null ? ApiResponse.notFound() : ApiResponse.ok(value);
+            var value = application.readObject(context, principal, type, parts[4]);
+            if (value == null) return ApiResponse.notFound();
+            return ApiResponse.ok(value.consentRestricted() ? Map.of("id", value.key().id(), "_consentRestricted", true) : value.object());
         }
         if (parts.length == 6 && "history".equals(parts[5])) {
             return ApiResponse.ok(application.history(context, principal, new EntityKey(type, parts[4])));
@@ -121,6 +148,8 @@ public final class RestApiRouter {
     public ApiResponse query(RequestContext context, SecurityPrincipal principal, String type, ObjectQuery query) {
         try {
             return ApiResponse.ok(application.queryObjects(context, principal, type, query).connection());
+        } catch (org.openfoundry.foundation.security.ConsentDeniedException denied) {
+            return new ApiResponse(403, Map.of("code", "CONSENT_DENIED", "error", "Consent is not granted for this operation"));
         } catch (SecurityException denied) {
             return ApiResponse.forbidden();
         } catch (IllegalArgumentException invalid) {
@@ -131,6 +160,8 @@ public final class RestApiRouter {
     public ApiResponse query(RequestContext context, SecurityPrincipal principal, String type, ObjectConnectionQuery query) {
         try {
             return ApiResponse.ok(application.queryConnection(context, principal, type, query));
+        } catch (org.openfoundry.foundation.security.ConsentDeniedException denied) {
+            return new ApiResponse(403, Map.of("code", "CONSENT_DENIED", "error", "Consent is not granted for this operation"));
         } catch (SecurityException denied) {
             return ApiResponse.forbidden();
         } catch (IllegalArgumentException invalid) {
@@ -141,6 +172,8 @@ public final class RestApiRouter {
     public ApiResponse aggregate(RequestContext context, SecurityPrincipal principal, String type, AggregateQuery query) {
         try {
             return ApiResponse.ok(application.aggregateObjects(context, principal, type, query));
+        } catch (org.openfoundry.foundation.security.ConsentDeniedException denied) {
+            return new ApiResponse(403, Map.of("code", "CONSENT_DENIED", "error", "Consent is not granted for this operation"));
         } catch (SecurityException denied) {
             return ApiResponse.forbidden();
         } catch (IllegalArgumentException invalid) {
@@ -151,6 +184,8 @@ public final class RestApiRouter {
     public ApiResponse search(RequestContext context, SecurityPrincipal principal, String type, SearchQuery query) {
         try {
             return ApiResponse.ok(application.searchObjects(context, principal, type, query));
+        } catch (org.openfoundry.foundation.security.ConsentDeniedException denied) {
+            return new ApiResponse(403, Map.of("code", "CONSENT_DENIED", "error", "Consent is not granted for this operation"));
         } catch (SecurityException denied) {
             return ApiResponse.forbidden();
         } catch (IllegalArgumentException invalid) {
@@ -161,6 +196,8 @@ public final class RestApiRouter {
     public ApiResponse resume(RequestContext context, SecurityPrincipal principal, String actionName, String actionId) {
         try {
             return ApiResponse.ok(application.resume(context, principal, actionName, actionId));
+        } catch (org.openfoundry.foundation.security.ConsentDeniedException denied) {
+            return new ApiResponse(403, Map.of("code", "CONSENT_DENIED", "error", "Consent is not granted for this operation"));
         } catch (SecurityException denied) {
             return ApiResponse.forbidden();
         } catch (IllegalArgumentException invalid) {
@@ -174,6 +211,8 @@ public final class RestApiRouter {
         if (!manifest.action().equals(actionName)) return ApiResponse.badRequest("action name mismatch");
         try {
             return ApiResponse.ok(application.execute(manifest, context, principal, parameters, idempotencyKey));
+        } catch (org.openfoundry.foundation.security.ConsentDeniedException denied) {
+            return new ApiResponse(403, Map.of("code", "CONSENT_DENIED", "error", "Consent is not granted for this operation"));
         } catch (SecurityException denied) {
             return ApiResponse.forbidden();
         } catch (org.openfoundry.foundation.spi.schema.PropertyValidationException invalid) {

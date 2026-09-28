@@ -22,7 +22,9 @@ final class GraphqlQueryTypes {
         for (String name : GraphqlAggregateTypes.NAMES) reserve(names, name);
         for (String scalar : scalarTypes(schema)) reserve(names, scalar + "Filter");
         for (String name : GraphqlObjectSetTypes.NAMES) reserve(names, name);
+        for (String name : GraphqlConsentTypes.NAMES) reserve(names, name);
         var queries = new HashSet<String>(GraphqlObjectSetTypes.QUERIES);
+        queries.addAll(GraphqlConsentTypes.QUERIES);
         for (var object : schema.objectTypes()) {
             for (String suffix : List.of("Filter", "OrderBy", "Connection", "Edge")) reserve(names, object.name() + suffix);
             reserve(names, "SearchHit_" + object.name());
@@ -174,6 +176,7 @@ final class GraphqlQueryTypes {
         schema.objectTypes().forEach(object -> result.append(GraphqlSearchTypes.sdl(object.name())));
         result.append(GraphqlAggregateTypes.sdl());
         result.append(GraphqlObjectSetTypes.sdl());
+        result.append(GraphqlConsentTypes.sdl());
         return result.toString();
     }
 }

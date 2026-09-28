@@ -615,7 +615,7 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
         void bind(PreparedStatement statement) throws SQLException;
     }
 
-    private final class JdbcTransaction implements Transaction {
+    private final class JdbcTransaction implements Transaction, JdbcTransactionAccess {
         private final RequestContext context;
         private final Connection connection;
         private final String transactionId = UUID.randomUUID().toString();
@@ -654,6 +654,9 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
             return schema.linkTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst()
                     .orElseThrow(() -> new IllegalArgumentException("unknown link type: " + type));
         }
+
+        @Override public DataSource transactionDataSource() { return dataSource; }
+        @Override public Connection transactionConnection() { assertOpen(); return connection; }
 
         @Override
         public String transactionId() {

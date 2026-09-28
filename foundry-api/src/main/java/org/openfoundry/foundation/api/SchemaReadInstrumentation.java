@@ -44,7 +44,10 @@ final class SchemaReadInstrumentation extends SimplePerformantInstrumentation {
                 ((State) state).applicationRead = true;
             }
             try { return fetcher.get(environment); }
-            catch (SchemaVersionMismatchException stale) {
+            catch (org.openfoundry.foundation.security.ConsentDeniedException denied) {
+                throw GraphqlErrorException.newErrorException().message("Consent is not granted for this operation")
+                        .extensions(Map.of("code", "CONSENT_DENIED", "retryable", false)).build();
+            } catch (SchemaVersionMismatchException stale) {
                 throw GraphqlErrorException.newErrorException().message("Deployment schema must be refreshed").extensions(extensions()).build();
             }
         };

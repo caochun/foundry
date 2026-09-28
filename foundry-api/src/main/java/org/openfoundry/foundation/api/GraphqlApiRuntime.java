@@ -84,6 +84,7 @@ public final class GraphqlApiRuntime {
             definition.properties().forEach(property -> iface.field(field(property, enums)));
             definition.linkFields().forEach(property -> iface.field(linkField(property, application)));
             definition.computedFields().forEach(property -> iface.field(computedField(property)));
+            iface.field(consentField());
             interfaces.put(definition.name(), iface.build());
         }
         Map<String, GraphQLObjectType> objectTypes = new java.util.LinkedHashMap<>();
@@ -93,6 +94,7 @@ public final class GraphqlApiRuntime {
             definition.properties().forEach(property -> object.field(field(property, enums)));
             definition.linkFields().forEach(property -> object.field(linkField(property, application)));
             definition.computedFields().forEach(property -> object.field(computedField(property)));
+            object.field(consentField());
             objectTypes.put(definition.name(), object.build());
         }
 
@@ -102,6 +104,7 @@ public final class GraphqlApiRuntime {
             definition.interfaces().forEach(name -> link.withInterface(interfaces.get(name)));
             definition.properties().forEach(property -> link.field(field(property, enums)));
             definition.linkFields().forEach(property -> link.field(linkField(property, application)));
+            link.field(consentField());
             linkTypes.put(definition.name(), link.build());
         }
 
@@ -120,7 +123,7 @@ public final class GraphqlApiRuntime {
                     .dataFetcher(env -> {
                         ApiRequestContext request = request(env);
                         String id = env.getArgument("id");
-                        return application.getObject(request.request(), request.principal(), definition.name(), id);
+                        return application.readObject(request.request(), request.principal(), definition.name(), id);
                     }).build());
             var connection = GraphqlQueryTypes.connection(type, pageInfo);
             if (queryMode == QueryMode.LEGACY_LIST) {
@@ -171,6 +174,7 @@ public final class GraphqlApiRuntime {
         }
         var sets = new GraphqlObjectSetTypes(objectSets == null ? null : new ObjectSetService(application, objectSets));
         sets.install(query, mutation, pageInfo, aggregates.resultType());
+        new GraphqlConsentTypes(application).install(query, mutation);
         GraphQLSchema.Builder graphQLSchema = GraphQLSchema.newSchema().query(query.build()).mutation(mutation.build());
         graphQLSchema.additionalTypes(new java.util.HashSet<>(interfaces.values()));
         graphQLSchema.additionalTypes(new java.util.HashSet<>(enums.values()));
@@ -198,6 +202,10 @@ public final class GraphqlApiRuntime {
         if (property.primary()) type = GraphQLNonNull.nonNull(type);
         return GraphQLFieldDefinition.newFieldDefinition().name(property.name()).type(type).dataFetcher(environment -> {
             Object source = environment.getSource();
+            if (source instanceof ObjectReadResult result) {
+                if (result.consentRestricted()) return property.primary() ? result.key().id() : null;
+                source = result.object();
+            }
             if (source instanceof ObjectRecord record) {
                 return property.primary() ? record.id() : record.properties().get(property.name());
             }
@@ -210,10 +218,23 @@ public final class GraphqlApiRuntime {
 
     private static GraphQLFieldDefinition computedField(org.openfoundry.foundation.spi.schema.ComputedFieldDefinition field) {
         return GraphQLFieldDefinition.newFieldDefinition().name(field.name()).type(Scalars.GraphQLInt)
-                .dataFetcher(environment -> ((ObjectRecord) environment.getSource()).properties().get(field.name())).build();
+                .dataFetcher(environment -> {
+                    Object source = environment.getSource();
+                    if (source instanceof ObjectReadResult result) {
+                        if (result.consentRestricted()) return null;
+                        source = result.object();
+                    }
+                    return ((ObjectRecord) source).properties().get(field.name());
+                }).build();
+    }
+
+    private static GraphQLFieldDefinition consentField() {
+        return GraphQLFieldDefinition.newFieldDefinition().name("_consentRestricted").type(Scalars.GraphQLBoolean)
+                .dataFetcher(environment -> environment.getSource() instanceof ObjectReadResult result && result.consentRestricted()).build();
     }
 
     private static String entityType(Object source) {
+        if (source instanceof ObjectReadResult result) return result.key().type();
         if (source instanceof ObjectRecord object) return object.type();
         if (source instanceof LinkRecord link) return link.type();
         throw new IllegalStateException("Unsupported GraphQL entity source");
@@ -232,7 +253,12 @@ public final class GraphqlApiRuntime {
         }
         return builder.dataFetcher(environment -> {
             var request = request(environment);
-            ObjectRecord source = environment.getSource();
+            Object value = environment.getSource();
+            if (value instanceof ObjectReadResult result) {
+                if (result.consentRestricted()) return null;
+                value = result.object();
+            }
+            ObjectRecord source = (ObjectRecord) value;
             return application.readLinkField(request.request(), request.principal(), source.key(), field.name(),
                     new QueryOptions(environment.getArgumentOrDefault("first", 100),
                             environment.getArgumentOrDefault("offset", 0), null, null, false));

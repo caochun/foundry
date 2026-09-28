@@ -37,6 +37,7 @@ final class GraphqlActionTypes {
 
     static void validateCoreMutationNames(Collection<ActionTypeDefinition> actions) {
         var names = new HashSet<>(GraphqlObjectSetTypes.MUTATIONS);
+        names.addAll(GraphqlConsentTypes.MUTATIONS);
         for (var action : actions) {
             String name = Character.toLowerCase(action.name().charAt(0)) + action.name().substring(1);
             if (!names.add(name)) throw new IllegalArgumentException("Duplicate or reserved mutation name: " + name);
