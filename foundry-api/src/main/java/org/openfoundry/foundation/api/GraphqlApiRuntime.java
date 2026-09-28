@@ -162,7 +162,7 @@ public final class GraphqlApiRuntime {
                 ApiRequestContext request = request(environment);
                 Map<String, Object> input;
                 if (actionMode == ActionMode.LEGACY_JSON) {
-                    try { input = new ObjectMapper().readValue((String) environment.getArgument("input"), new TypeReference<>() {}); }
+                    try { input = ApiJson.mapper().readValue((String) environment.getArgument("input"), new TypeReference<>() {}); }
                     catch (Exception invalid) { throw new IllegalArgumentException("Action input must be valid JSON", invalid); }
                 } else {
                     input = environment.getArgumentOrDefault("input", Map.of());

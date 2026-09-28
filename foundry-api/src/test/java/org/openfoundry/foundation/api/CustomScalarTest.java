@@ -39,12 +39,15 @@ class CustomScalarTest {
                 uniqueValue: Payload @unique
             }
             type Related @linkType(from:"Item",to:"Item",cardinality:MANY_TO_MANY) { id: ID! @primary payload: Payload! }
-            type Create @actionType(permission:"can_create") { id: ID! @param payload: Payload! @param payloads: [Payload!] @param }
+            type Create @actionType(permission:"can_create") { id: ID! @param payload: Payload! @param payloads: [Payload!] @param numeric: Float @param }
             """;
     static final OntologySchema SCHEMA = new OdlParser().parse(ODL);
     static final ActionManifest CREATE = new ActionManifestParser().parse("""
             action: Create
             version: 1
+            preconditions:
+              - expr: "!has(params.numeric) || params.numeric == null || params.numeric > 0.0"
+                error: "numeric must be positive"
             effects:
               - type: createObject
                 objectType: Item
@@ -64,7 +67,8 @@ class CustomScalarTest {
                 test(provider, "scalar metadata changes invalidate old applications", this::binding),
                 test(provider, "custom scalar constraints validate nested values", this::constraints),
                 test(provider, "precise nested numbers survive persistence and activation", this::preciseNumbers),
-                test(provider, "opaque equality grouping and field visibility govern queries", this::queries)));
+                test(provider, "opaque equality grouping and field visibility govern queries", this::queries),
+                test(provider, "HTTP and legacy GraphQL preserve numeric input before validation", this::wirePrecision)));
     }
 
     private DynamicTest test(String provider, String name, Consumer<Fixture> check) {
@@ -157,6 +161,32 @@ class CustomScalarTest {
         var parsed = new SchemaParser().parse(contract);
         assertTrue(parsed.scalars().containsKey("Payload"));
         assertEquals(1, contract.split("scalar Payload", -1).length - 1);
+    }
+
+    private void wirePrecision(Fixture f) {
+        String body = "{\"id\":\"a\",\"numeric\":1.0000000000000000001,\"payload\":{\"number\":1.0000000000000000001}}";
+        try (var server = new JdkRestServer(0, new RestApiRouter(f.app), () -> new ApiRequestContext(CONTEXT, PRINCIPAL), Map.of("Create", CREATE));
+             var client = java.net.http.HttpClient.newHttpClient()) {
+            server.start();
+            var request = java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + server.port() + "/api/v1/actions/Create"))
+                    .header("Content-Type", "application/json").header("Idempotency-Key", "wire")
+                    .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body)).build();
+            var response = client.send(request, java.net.http.HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, response.statusCode(), response.body());
+            assertEquals(response.body(), client.send(request, java.net.http.HttpResponse.BodyHandlers.ofString()).body());
+            var read = client.send(java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + server.port() + "/api/v1/Item/a")).build(),
+                    java.net.http.HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, read.statusCode());
+            assertTrue(read.body().contains("1.0000000000000000001"), read.body());
+        } catch (Exception failure) {
+            throw new AssertionError(failure);
+        }
+        var legacy = GraphqlApiRuntime.createLegacy(SCHEMA, f.app, Map.of("Create", CREATE));
+        var result = legacy.execute(input("mutation($input:String!){create(input:$input)}", Map.of("input", body.replace("\"a\"", "\"b\""))));
+        assertTrue(result.getErrors().isEmpty(), result.getErrors().toString());
+        for (String id : List.of("a", "b")) {
+            assertEquals(Map.of("number", new java.math.BigDecimal("1.0000000000000000001")), f.storage.getObject(CONTEXT, "Item", id).properties().get("payload"));
+        }
     }
 
     private void queries(Fixture f) {

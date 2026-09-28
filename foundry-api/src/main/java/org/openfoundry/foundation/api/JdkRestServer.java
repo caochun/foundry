@@ -22,7 +22,7 @@ public final class JdkRestServer implements AutoCloseable {
     private final RestApiRouter router;
     private final Supplier<ApiRequestContext> requestContext;
     private final Map<String, ActionManifest> manifests;
-    private final ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+    private final ObjectMapper mapper = ApiJson.mapper().registerModule(new JavaTimeModule());
 
     public JdkRestServer(int port, RestApiRouter router, Supplier<ApiRequestContext> requestContext) throws IOException {
         this(port, router, requestContext, Map.of());

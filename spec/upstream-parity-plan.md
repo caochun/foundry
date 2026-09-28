@@ -233,8 +233,8 @@ recordConsent动作效果、条件/补偿、实时会话/订阅失效、跨数�
 
 ## F3自定义scalar与值链路验证记录
 
-2026-09-28：常规根reactor683项，其中Foundry573项，全部通过，无失败/错误/跳过。新增24项覆盖memory/H2对象/关系/历史、不可变值、约束/唯一性、Action/GraphQL、敏感字段、完整值筛选/分组、精确数字回读/重放/激活、scalar元数据/冲突、Pack依赖、注册表恢复和旧指纹。数字字面解析完善后另定向复核CustomScalar/OdlParser/SchemaCompiler。
+2026-09-28：常规根reactor685项，其中Foundry575项，全部通过，无失败/错误/跳过。新增26项覆盖memory/H2对象/关系/历史、不可变值、约束/唯一性、Action/GraphQL、敏感字段、完整值筛选/分组、精确数字回读/重放/激活、scalar元数据/冲突、Pack依赖、注册表恢复和旧指纹。数字字面解析完善后另定向复核CustomScalar/OdlParser/SchemaCompiler及HTTP精度/Float CEL和Action边界。
 
-声明scalar不再丢失，未附类型指令的普通type按上游作为对象编译。非平台scalar明确使用不透明JSON值，平台日期等校验保持；eq/ne/in/exists和分组按规范值比较，不猜测字符串/数值运算。说明进入模型身份；空scalar列表保持旧持久摘要，新增声明须通过显式模型激活。
+声明scalar不再丢失，未附类型指令的普通type按上游作为对象编译。非平台scalar明确使用不透明JSON值，平台日期等校验保持；eq/ne/in/exists和分组按规范值比较，不猜测字符串/数值运算。JDK REST与旧GraphQL JSON输入也保留数字精度。说明进入模型身份；空scalar列表保持旧持久摘要，新增声明须通过显式模型激活。
 
 独立探针确认两种Provider均保留高精度值、隐藏敏感属性、同键返回原结果、完整值eq命中1条且拒绝不透明排序，GraphQL名称/说明/值正确。完整AST、内嵌结构值/嵌套筛选、原生下推、同步和生产验收等继续，完整目标保持active。见ADR-0027；运行库与JAR未改动。

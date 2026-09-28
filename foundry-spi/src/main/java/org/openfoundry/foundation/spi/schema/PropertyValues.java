@@ -320,6 +320,12 @@ public final class PropertyValues {
         return canonical(normalize(schema, property.type(), raw, property.name()));
     }
 
+    /** Keep ordinary Double wire values compatible, retaining decimals that would otherwise be rounded. */
+    public static Number jsonDecimal(BigDecimal exact) {
+        double approximate = exact.doubleValue();
+        return Double.isFinite(approximate) && BigDecimal.valueOf(approximate).compareTo(exact) == 0 ? approximate : exact;
+    }
+
     public static String canonical(Object value) {
         if (value == null) return "null;";
         if (value instanceof String text) return "s" + text.length() + ":" + text;

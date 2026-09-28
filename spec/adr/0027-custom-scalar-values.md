@@ -42,7 +42,7 @@ GraphQL使用声明的scalar名称和说明，输入输出均传JSON值，不将
 
 ODL数字字面量根据精度保留Integer/Long/BigInteger及Double/BigDecimal。普通可无损表达的小数仍保持既有Double形态；高精度值不先转Double。Int字段的32位边界由类型校验检查，不误限制嵌套JSON/custom scalar中的大整数。
 
-JDBC对象/关系、历史、回执/continuation及激活校验接入已有JsonNumbers解码器：普通JSON数字兼容原形态，无法精确表示为Double的小数保留BigDecimal。因此相邻高精度唯一值在回读/激活时不会被舍入成相同值。已经由旧版本舍入的数据不自动恢复；边缘HTTP客户端自身的JSON数字精度仍取决于客户端。
+JDBC对象/关系、历史、回执/continuation及激活校验接入已有JsonNumbers解码器：普通JSON数字兼容原形态，无法精确表示为Double的小数保留BigDecimal。因此相邻高精度唯一值在回读/激活时不会被舍入成相同值。JDK REST请求和旧GraphQL JSON输入也在解析阶段使用同一数值规则；声明为Float的参数仍按平台Double语义进入CEL，而opaque scalar保持精度。已经由旧版本舍入的数据不自动恢复；边缘HTTP客户端自身的JSON数字精度仍取决于客户端。曾被旧HTTP解析器舍入的高精度请求现在具有不同的参数指纹，旧幂等键会拒绝不同内容，不伪装为同一命令。
 
 ## 查询
 
@@ -60,6 +60,6 @@ JDBC对象/关系、历史、回执/continuation及激活校验接入已有JsonN
 
 ## 验证和边界
 
-测试覆盖memory/JDBC对象/关系/历史、深拷贝、非法值和列表/必填/唯一约束、嵌套CEL、Action和敏感字段、GraphQL变量/字面量/说明/静态SDL、精确数值重放与激活、完整值筛选/分组、Pack所有权/依赖、冲突声明、无注解实体、旧快照摘要及注册表文件重启。
+测试覆盖memory/JDBC对象/关系/历史、深拷贝、非法值和列表/必填/唯一约束、嵌套CEL、Action和敏感字段、真实HTTP输入/输出与重放、旧GraphQL JSON输入/Float CEL、GraphQL变量/字面量/说明/静态SDL、精确数值重放与激活、完整值筛选/分组、Pack所有权/依赖、冲突声明、无注解实体、旧快照摘要及注册表文件重启。
 
 本阶段不等于完整ODL覆盖：内嵌结构值、接口型动作参数、其他指令元数据/代码生成、关系写入声明约束等仍需实现；任意自定义codec插件不是当前scalar契约。查询仍由现有受控应用引擎执行，SQL下推、统一快照和真实目标数据库/性能验收继续。

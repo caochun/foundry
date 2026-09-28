@@ -368,9 +368,7 @@ public final class OdlParser {
             return exact;
         }
         if (value instanceof graphql.language.FloatValue number) {
-            var exact = number.getValue();
-            double approximate = exact.doubleValue();
-            return Double.isFinite(approximate) && java.math.BigDecimal.valueOf(approximate).compareTo(exact) == 0 ? approximate : exact;
+            return org.openfoundry.foundation.spi.schema.PropertyValues.jsonDecimal(number.getValue());
         }
         if (value instanceof graphql.language.ArrayValue list) return list.getValues().stream().map(OdlParser::literal).toList();
         if (value instanceof graphql.language.ObjectValue object) {

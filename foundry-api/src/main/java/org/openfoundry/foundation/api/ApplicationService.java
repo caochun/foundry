@@ -492,6 +492,9 @@ public final class ApplicationService {
             String element = type.substring(1, type.length() - 1);
             return list.stream().map(item -> resolve(context, element, item)).toList();
         }
+        if (type.equals("Float") && value instanceof java.math.BigDecimal) {
+            return org.openfoundry.foundation.spi.schema.PropertyValues.normalize(schema, type, value, "$parameter");
+        }
         if ((schema == null ? org.openfoundry.foundation.spi.schema.PropertyValues.SCALARS.contains(type) : schema.isScalar(type)) || enumTypes.contains(type)) return value;
         if (!objectTypes.contains(type) || !(value instanceof String id) || id.isBlank()) {
             throw new IllegalArgumentException("Object parameter must be an ID of its declared type");
