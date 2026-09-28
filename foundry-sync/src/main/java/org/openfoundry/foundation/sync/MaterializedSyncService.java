@@ -56,6 +56,13 @@ public final class MaterializedSyncService {
     }
 
     public SyncResult sync(Connector connector, SourceQuery query, MappingConfig mapping, RequestContext context) {
+        return sync(connector, query, mapping, context, record -> {});
+    }
+
+    /** Acknowledgment runs after commit/replay and outside the per-record mutation failure handler. */
+    public SyncResult sync(Connector connector, SourceQuery query, MappingConfig mapping, RequestContext context,
+                           java.util.function.Consumer<SourceRecord> committed) {
+        Objects.requireNonNull(committed);
         requirePipeline(context, connector.name(), mapping);
         var binding = Objects.requireNonNull(storage.schemaBinding(), "Apply the schema before ingestion");
         storage.requireSchemaBinding(context, binding);
@@ -101,6 +108,7 @@ public final class MaterializedSyncService {
                     failures.add(new SyncFailure(source.sourceSystem(), source.sourceRecordId(), failure.getMessage()));
                     break; // Never acknowledge a later cursor over a failed record.
                 }
+                committed.accept(source);
             }
         }
         return new SyncResult(counts.created, counts.updated, counts.deleted, counts.restored, counts.observed, counts.ignored, counts.replayed, counts.conflicts, failures, counts.relationshipChanges);
