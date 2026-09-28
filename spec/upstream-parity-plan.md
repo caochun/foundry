@@ -59,7 +59,8 @@
 - [x] 事务关系物化：稳定来源/槽/端点身份、改派/恢复、成员scope与属性来源、人工冲突、两端授权、format-2回执及独立JVM恢复。
 - [x] 托管JDBC生命周期/模式发现、按需keyset分批、暂停/恢复/限速、联合时间游标与事务续读；插件注册及BATCH/POLLING单次装配、来源/配置漂移检查、独立JVM中断/竞争验证。
 - [x] Debezium JSON CDC解码、Kafka显式分区会话、逐条事务后确认、失败停点/重投、tombstone处理、精确逻辑时间/Decimal及消费暂停/关闭；
-- [ ] 完整数据源计划装配；REST托管/分页、其他主键、Schema Registry/rebalance/租约、CDC背压/断线重连、overlay/writeback、自动调度/死信；函数自动依赖血缘、GraphQL血缘及真实来源系统联调。
+- [x] Overlay只读read-through投影、TTL缓存、不可变来源信息、托管连接器生命周期及本地mutation拒绝；
+- [ ] 完整数据源计划装配；REST托管/分页、其他主键、Schema Registry/rebalance/租约、CDC背压/断线重连、overlay关系投影/writeback、自动调度/死信；函数自动依赖血缘、GraphQL血缘及真实来源系统联调。
 - [x] Outbox领取/重试、消费完成回执及租约恢复；内存/H2和独立JVM中断验证。
 - [x] Action副作用持久任务、事件/受限webhook处理器、三种失败策略、版本与关联保护的本地补偿；独立JVM恢复及HTTP续执行入口。
 - [ ] 外部投递真实联调、宿主调度与运维修复、死信及回调自动续租；审计覆盖拒绝与成功路径。
@@ -295,3 +296,10 @@ ManagedConnector及插件工厂明确生命周期与宿主池所有权。Datasou
 2026-09-28：新增DebeziumDecoder、CdcTransport、KafkaCdcTransport及CdcConsumer，Foundry常规回归804项，全部通过。解码覆盖create/update/delete/read、tombstone、Kafka Connect Decimal/日期/时间/嵌套结构；消费覆盖逐条事务后确认、失败停点、重复投递回执、授权拒绝、暂停/恢复和关闭。
 
 Kafka适配器关闭自动提交，固定topic/partition，按Foundry checkpoint seek，使用read_committed并限制单次poll/消息尺寸；本地事实/关系/回执/检查点提交后才commitSync。失败消息不确认，下一次会话从最后已确认offset之后重投；tombstone不生成无依据的删除事实。独立Kafka broker、Schema Registry wire format、rebalance/租约、断线重连、死信/运维和吞吐验收仍待完成，详见ADR-0033。Mirror运行库和JAR未改动，完整目标保持active。
+
+
+## F4 Overlay投影验证记录
+
+2026-09-28：新增OverlayEngine与ManagedOverlay，覆盖TTL命中/过期/清除、键规范化、缺失/删除、不可变来源、只读mutation拒绝、writeback/模式门禁及托管JDBC来源。Overlay响应不进入StorageProvider、历史、回执或检查点；关闭时释放连接器。
+
+当前overlay仍是实例内非持久缓存，不能提供跨节点失效、源端一致快照、stale-while-revalidate或关系授权投影。writeback、关系读取、真实REST/国产库和生产规模验收继续，详见ADR-0034。Mirror运行库和JAR未改动，完整目标保持active。
