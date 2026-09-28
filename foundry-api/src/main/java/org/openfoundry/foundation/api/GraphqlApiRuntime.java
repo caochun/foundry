@@ -54,6 +54,7 @@ public final class GraphqlApiRuntime {
 
     public static GraphQL create(OntologySchema schema, ApplicationService application,
                                  Map<String, ActionManifest> manifests, ActionMode actionMode, QueryMode queryMode) {
+        application.requireRenderingSchema(schema);
         java.util.Objects.requireNonNull(actionMode);
         java.util.Objects.requireNonNull(queryMode);
         var declared = schema.actionTypes().stream().collect(java.util.stream.Collectors.toMap(type -> type.name(), type -> type));
@@ -167,7 +168,7 @@ public final class GraphqlApiRuntime {
         graphQLSchema.additionalTypes(new java.util.HashSet<>(interfaces.values()));
         graphQLSchema.additionalTypes(new java.util.HashSet<>(enums.values()));
         graphQLSchema.additionalTypes(new java.util.HashSet<>(linkTypes.values()));
-        return GraphQL.newGraphQL(graphQLSchema.build()).build();
+        return GraphQL.newGraphQL(graphQLSchema.build()).instrumentation(new SchemaReadInstrumentation(application)).build();
     }
 
     private static GraphQLFieldDefinition connectionField(String name, String type, GraphQLObjectType connection,

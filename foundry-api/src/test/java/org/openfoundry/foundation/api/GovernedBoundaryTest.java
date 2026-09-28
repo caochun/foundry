@@ -46,13 +46,9 @@ class GovernedBoundaryTest {
 
     private InMemoryStorageProvider storage() {
         var storage = new InMemoryStorageProvider();
-        var storageFields = new java.util.ArrayList<>(SCHEMA.objectTypes().getFirst().properties());
-        storageFields.add(new org.openfoundry.foundation.spi.schema.PropertyDefinition("unregistered", "String", false, false, false, false, false, false));
-        // Storage can contain a field outside this API's registered projection; reads must still hide it.
-        storage.applySchema(CONTEXT, new OntologySchema(SCHEMA.namespace(), SCHEMA.version(),
-                List.of(new org.openfoundry.foundation.spi.schema.ObjectTypeDefinition("Item", storageFields)), SCHEMA.linkTypes(), SCHEMA.actionTypes()));
+        storage.applySchema(CONTEXT, SCHEMA);
         try (var tx = storage.beginTransaction(CONTEXT)) {
-            tx.createObject("Item", "a", Map.of("name", "Initial", "secret", "synthetic", "unregistered", "must-not-leak"));
+            tx.createObject("Item", "a", Map.of("name", "Initial", "secret", "synthetic"));
             tx.createObject("Item", "b", Map.of("name", "Other", "secret", "synthetic-other"));
             tx.commit();
         }
@@ -60,9 +56,34 @@ class GovernedBoundaryTest {
     }
 
     private ApplicationService app(InMemoryStorageProvider storage, RelationshipAuthorizer authorizer, Map<String, FieldPolicy> policies) {
-        return new ApplicationService(storage, new AuthorizationService(authorizer),
+        return new ApplicationService(withExtraReadValues(storage), new AuthorizationService(authorizer),
                 new ActionExecutor(ExpressionEvaluator.simple(), new InMemoryIdempotencyStore()),
                 SCHEMA, Map.of("Rename", RENAME, "Create", CREATE), policies);
+    }
+
+    private StorageProvider withExtraReadValues(StorageProvider storage) {
+        // A faulty/legacy payload can contain extra values without changing the authoritative schema.
+        return (StorageProvider) java.lang.reflect.Proxy.newProxyInstance(StorageProvider.class.getClassLoader(), new Class<?>[]{StorageProvider.class}, (proxy, method, args) -> {
+            try { return extraValue(method.invoke(storage, args)); }
+            catch (java.lang.reflect.InvocationTargetException failure) { throw failure.getCause(); }
+        });
+    }
+
+    private Object extraValue(Object value) {
+        if (value instanceof ObjectRecord record) {
+            var properties = new java.util.LinkedHashMap<>(record.properties());
+            properties.put("unregistered", "must-not-leak");
+            return new ObjectRecord(record.tenantId(), record.type(), record.id(), record.version(), record.createdAt(), record.updatedAt(),
+                    record.deletedAt(), record.lastTransactionId(), record.lastActionId(), properties);
+        }
+        if (value instanceof HistorySnapshot record) {
+            var state = new java.util.LinkedHashMap<>(record.state());
+            state.put("unregistered", "must-not-leak");
+            return new HistorySnapshot(record.key(), record.version(), record.operation(), record.validFrom(), record.validTo(), record.recordedAt(),
+                    record.transactionId(), record.actionId(), record.actorId(), record.sourceSystem(), state);
+        }
+        if (value instanceof List<?> list) return list.stream().map(this::extraValue).toList();
+        return value;
     }
 
     @Test

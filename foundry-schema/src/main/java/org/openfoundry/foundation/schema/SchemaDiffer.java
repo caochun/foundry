@@ -26,7 +26,8 @@ public final class SchemaDiffer {
                     entry.getValue().containsAll(old) ? MigrationClass.COMPATIBLE : MigrationClass.BREAKING));
         }
         for (String name : previous.enums().keySet()) if (!next.enums().containsKey(name)) changes.add(new SchemaChange("enum." + name, "enum removed", MigrationClass.BREAKING));
-        if (!previous.interfaces().equals(next.interfaces())) {
+        if (!SchemaFingerprint.equivalent(previous.interfaces().stream().sorted(java.util.Comparator.comparing(org.openfoundry.foundation.spi.schema.InterfaceDefinition::name)).toList(),
+                next.interfaces().stream().sorted(java.util.Comparator.comparing(org.openfoundry.foundation.spi.schema.InterfaceDefinition::name)).toList())) {
             changes.add(new SchemaChange("interfaces", "interface definitions or ancestry changed", MigrationClass.BREAKING));
         }
         compareObjects(previous, next, changes);
@@ -140,13 +141,13 @@ public final class SchemaDiffer {
             if (old == null) {
                 changes.add(new SchemaChange(owner + "." + name, "property added",
                         current.required() ? MigrationClass.BREAKING : MigrationClass.SAFE));
-            } else if (!old.equals(current)) {
+            } else if (!SchemaFingerprint.equivalent(old, current)) {
                 MigrationClass classification = old.type().equals(current.type()) && !old.required() && current.required()
                         ? MigrationClass.BREAKING : MigrationClass.COMPATIBLE;
                 if (!old.type().equals(current.type()) || old.primary() != current.primary()
                         || !old.unique() && current.unique() || !old.immutable() && current.immutable()
                         || old.readOnly() != current.readOnly() || !old.constraints().equals(current.constraints())
-                        || old.hasDefault() != current.hasDefault() || !java.util.Objects.equals(old.defaultValue(), current.defaultValue())) classification = MigrationClass.BREAKING;
+                        || old.hasDefault() != current.hasDefault() || !SchemaFingerprint.equivalent(old.defaultValue(), current.defaultValue())) classification = MigrationClass.BREAKING;
                 changes.add(new SchemaChange(owner + "." + name, "property definition changed", classification));
             }
         }

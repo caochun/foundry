@@ -22,7 +22,7 @@ import java.util.stream.Collectors;
 
 /** Authenticated boundary shared by REST and GraphQL. Schema, manifests and policies are trusted startup configuration. */
 public final class ApplicationService {
-    private final StorageProvider storage;
+    private final SchemaBoundStorage storage;
     private final AuthorizationService authorization;
     private final ActionExecutor actions;
     private final Map<String, ActionTypeDefinition> definitions;
@@ -64,7 +64,7 @@ public final class ApplicationService {
         if (authorizationMode == AuthorizationMode.ONTOLOGY_TARGETS && objectTypes.contains("ActionType")) {
             throw new IllegalArgumentException("ActionType is reserved for object-less action authorization");
         }
-        this.storage = Objects.requireNonNull(storage);
+        this.storage = SchemaBoundStorage.bind(Objects.requireNonNull(storage), schema);
         this.authorization = Objects.requireNonNull(authorization);
         this.actions = schema == null ? Objects.requireNonNull(actions) : Objects.requireNonNull(actions).withParameterSchema(schema);
         this.enumTypes = schema == null ? Set.of() : Set.copyOf(schema.enums().keySet());
@@ -80,7 +80,7 @@ public final class ApplicationService {
         this.properties = Map.copyOf(propertyMap);
         this.computedFields = schema == null ? Map.of() : schema.objectTypes().stream()
                 .collect(Collectors.toUnmodifiableMap(type -> type.name(), type -> type.computedFields()));
-        this.computedEvaluator = schema == null ? null : new ComputedFieldEvaluator(storage, schema);
+        this.computedEvaluator = schema == null ? null : new ComputedFieldEvaluator(this.storage, schema);
         var navigation = new LinkedHashMap<String, Map<String, LinkFieldDefinition>>();
         if (schema != null) {
             org.openfoundry.foundation.spi.schema.PropertyValues.requireSchema(schema);
@@ -99,38 +99,59 @@ public final class ApplicationService {
         if (!properties.keySet().containsAll(fieldPolicies.keySet())) throw new IllegalArgumentException("Policy has an unknown type");
     }
 
+    void requireRenderingSchema(OntologySchema rendered) {
+        if (schema != null && !org.openfoundry.foundation.schema.SchemaFingerprint.of(schema).equals(
+                org.openfoundry.foundation.schema.SchemaFingerprint.of(rendered))) throw new SchemaVersionMismatchException();
+    }
+
+    /** Used by request adapters to discard a read response if activation changed during rendering. */
+    public void requireCurrentSchema(RequestContext context, SecurityPrincipal principal) {
+        requireContext(context, principal);
+        storage.requireCurrent(context);
+    }
+
     public ObjectRecord getObject(RequestContext context, SecurityPrincipal principal, String type, String id) {
         requireContext(context, principal);
-        if (!authorization.check(context, principal, "viewer", new EntityKey(type, id))) return null;
-        var object = storage.getObject(context, type, id);
-        return object == null || object.isDeleted() ? null : project(context, principal, object, QueryOptions.defaults());
+        return storage.read(context, () -> {
+            if (!authorization.check(context, principal, "viewer", new EntityKey(type, id))) return null;
+            var object = storage.getObject(context, type, id);
+            return object == null || object.isDeleted() ? null : project(context, principal, object, QueryOptions.defaults());
+        });
     }
 
     public List<ObjectRecord> listObjects(RequestContext context, SecurityPrincipal principal, String type, QueryOptions options) {
         requireContext(context, principal);
-        if (schema != null) return queryObjects(context, principal, type, ObjectQuery.all(options)).items();
-        // Metadata-only legacy callers still paginate after permission filtering.
-        var rows = storage.queryObjects(context, type, allRows(options)).stream()
-                .filter(object -> authorization.check(context, principal, "viewer", object.key())).toList();
-        return rows.stream().skip(options.offset()).limit(options.limit())
-                .map(object -> project(context, principal, object, options)).toList();
+        return storage.read(context, () -> {
+            if (schema != null) return queryObjects(context, principal, type, ObjectQuery.all(options)).items();
+            // Metadata-only legacy callers still paginate after permission filtering.
+            var rows = storage.queryObjects(context, type, allRows(options)).stream()
+                    .filter(object -> authorization.check(context, principal, "viewer", object.key())).toList();
+            return rows.stream().skip(options.offset()).limit(options.limit())
+                    .map(object -> project(context, principal, object, options)).toList();
+        });
     }
 
     public ObjectQueryResult queryObjects(RequestContext context, SecurityPrincipal principal, String type, ObjectQuery query) {
-        var matching = matchingObjects(context, principal, type, query);
-        var options = query.options();
-        var items = matching.stream().skip(options.offset()).limit(options.limit())
-                .map(object -> project(context, principal, object, options)).toList();
-        return new ObjectQueryResult(items, matching.size(), options.offset());
+        requireContext(context, principal);
+        return storage.read(context, () -> {
+            var matching = matchingObjects(context, principal, type, query);
+            var options = query.options();
+            var items = matching.stream().skip(options.offset()).limit(options.limit())
+                    .map(object -> project(context, principal, object, options)).toList();
+            return new ObjectQueryResult(items, matching.size(), options.offset());
+        });
     }
 
     public ObjectQueryResult.Connection queryConnection(RequestContext context, SecurityPrincipal principal, String type, ObjectConnectionQuery query) {
-        var source = query.sourceQuery();
-        var matching = matchingObjects(context, principal, type, source);
-        var window = query.page().window(matching.size());
-        var items = matching.subList(window.start(), window.end()).stream()
-                .map(object -> project(context, principal, object, source.options())).toList();
-        return new ObjectQueryResult(items, matching.size(), window.start()).connection();
+        requireContext(context, principal);
+        return storage.read(context, () -> {
+            var source = query.sourceQuery();
+            var matching = matchingObjects(context, principal, type, source);
+            var window = query.page().window(matching.size());
+            var items = matching.subList(window.start(), window.end()).stream()
+                    .map(object -> project(context, principal, object, source.options())).toList();
+            return new ObjectQueryResult(items, matching.size(), window.start()).connection();
+        });
     }
 
     private List<ObjectRecord> matchingObjects(RequestContext context, SecurityPrincipal principal, String type, ObjectQuery query) {
@@ -147,27 +168,31 @@ public final class ApplicationService {
 
     public AggregateResult aggregateObjects(RequestContext context, SecurityPrincipal principal, String type, AggregateQuery query) {
         requireContext(context, principal);
-        if (schema == null || !objectTypes.contains(type)) throw new IllegalArgumentException("Aggregate requires a registered object type");
-        var visible = visibleFields(principal, type);
-        var aggregation = new ObjectAggregationPlan(properties.get(type), visible, query);
-        var predicate = new ObjectQueryPlan(schema, properties.get(type), visible).predicate(query.filter());
-        var rows = storage.queryObjects(context, type, query.sourceView()).stream()
-                .filter(object -> authorization.check(context, principal, "viewer", object.key()))
-                .filter(predicate).toList();
-        return aggregation.evaluate(rows);
+        return storage.read(context, () -> {
+            if (schema == null || !objectTypes.contains(type)) throw new IllegalArgumentException("Aggregate requires a registered object type");
+            var visible = visibleFields(principal, type);
+            var aggregation = new ObjectAggregationPlan(properties.get(type), visible, query);
+            var predicate = new ObjectQueryPlan(schema, properties.get(type), visible).predicate(query.filter());
+            var rows = storage.queryObjects(context, type, query.sourceView()).stream()
+                    .filter(object -> authorization.check(context, principal, "viewer", object.key()))
+                    .filter(predicate).toList();
+            return aggregation.evaluate(rows);
+        });
     }
 
     public SearchResult searchObjects(RequestContext context, SecurityPrincipal principal, String type, SearchQuery query) {
         requireContext(context, principal);
-        if (schema == null || !objectTypes.contains(type)) throw new IllegalArgumentException("Search requires a registered object type");
-        var visible = visibleFields(principal, type);
-        var search = new ObjectSearchPlan(schema, properties.get(type), visible, query);
-        var predicate = new ObjectQueryPlan(schema, properties.get(type), visible).predicate(query.filter());
-        var view = query.sourceView();
-        var rows = storage.queryObjects(context, type, view).stream()
-                .filter(object -> authorization.check(context, principal, "viewer", object.key()))
-                .filter(predicate).toList();
-        return search.evaluate(rows, object -> project(context, principal, object, view));
+        return storage.read(context, () -> {
+            if (schema == null || !objectTypes.contains(type)) throw new IllegalArgumentException("Search requires a registered object type");
+            var visible = visibleFields(principal, type);
+            var search = new ObjectSearchPlan(schema, properties.get(type), visible, query);
+            var predicate = new ObjectQueryPlan(schema, properties.get(type), visible).predicate(query.filter());
+            var view = query.sourceView();
+            var rows = storage.queryObjects(context, type, view).stream()
+                    .filter(object -> authorization.check(context, principal, "viewer", object.key()))
+                    .filter(predicate).toList();
+            return search.evaluate(rows, object -> project(context, principal, object, view));
+        });
     }
 
     private static QueryOptions allRows(QueryOptions options) {
@@ -176,47 +201,51 @@ public final class ApplicationService {
 
     public List<HistorySnapshot> history(RequestContext context, SecurityPrincipal principal, EntityKey key) {
         requireContext(context, principal);
-        if (!canViewEntity(context, principal, key)) return List.of();
-        return storage.getEntityHistory(context, key).stream().map(history -> new HistorySnapshot(history.key(), history.version(),
-                history.operation(), history.validFrom(), history.validTo(), history.recordedAt(), history.transactionId(),
-                history.actionId(), history.actorId(), history.sourceSystem(), visible(principal, key.type(), history.state()))).toList();
+        return storage.read(context, () -> {
+            if (!canViewEntity(context, principal, key)) return List.of();
+            return storage.getEntityHistory(context, key).stream().map(history -> new HistorySnapshot(history.key(), history.version(),
+                    history.operation(), history.validFrom(), history.validTo(), history.recordedAt(), history.transactionId(),
+                    history.actionId(), history.actorId(), history.sourceSystem(), visible(principal, key.type(), history.state()))).toList();
+        });
     }
 
     /** Resolve a declared relationship field. Pagination counts authorized rows, never hidden edges. */
     public Object readLinkField(RequestContext context, SecurityPrincipal principal, EntityKey source,
                                 String fieldName, QueryOptions options) {
         requireContext(context, principal);
-        var field = linkFields.getOrDefault(source.type(), Map.of()).get(fieldName);
-        if (field == null) throw new IllegalArgumentException("Unknown relationship field");
-        if (options.asOfValidTime() != null || options.includeDeleted()) {
-            throw new IllegalArgumentException("Relationship fields use their declared history policy; point-in-time reads require a temporal query");
-        }
-        if (getObject(context, principal, source.type(), source.id()) == null
-                || !visibleLinkField(principal, source.type(), field)) return null;
-        int limit = field.many() ? options.limit() : 2;
-        int offset = field.many() ? options.offset() : 0;
-        int skipped = 0;
-        int rawOffset = 0;
-        var visible = new ArrayList<Object>();
-        while (visible.size() < limit) {
-            var rows = storage.getLinks(context, source, field.linkType(), field.direction(),
-                    new QueryOptions(100, rawOffset, null, null, field.history()));
-            for (var link : rows) {
-                Object value = visibleLinkedValue(context, principal, field, link);
-                if (value == null) continue;
-                if (skipped < offset) {
-                    skipped++;
-                    continue;
-                }
-                visible.add(value);
-                if (visible.size() == limit) break;
+        return storage.read(context, () -> {
+            var field = linkFields.getOrDefault(source.type(), Map.of()).get(fieldName);
+            if (field == null) throw new IllegalArgumentException("Unknown relationship field");
+            if (options.asOfValidTime() != null || options.includeDeleted()) {
+                throw new IllegalArgumentException("Relationship fields use their declared history policy; point-in-time reads require a temporal query");
             }
-            if (rows.size() < 100) break;
-            rawOffset = Math.addExact(rawOffset, rows.size());
-        }
-        if (field.many()) return List.copyOf(visible);
-        if (visible.size() > 1) throw new IllegalStateException("Relationship cardinality does not match the registered schema");
-        return visible.isEmpty() ? null : visible.getFirst();
+            if (getObject(context, principal, source.type(), source.id()) == null
+                    || !visibleLinkField(principal, source.type(), field)) return null;
+            int limit = field.many() ? options.limit() : 2;
+            int offset = field.many() ? options.offset() : 0;
+            int skipped = 0;
+            int rawOffset = 0;
+            var visible = new ArrayList<Object>();
+            while (visible.size() < limit) {
+                var rows = storage.getLinks(context, source, field.linkType(), field.direction(),
+                        new QueryOptions(100, rawOffset, null, null, field.history()));
+                for (var link : rows) {
+                    Object value = visibleLinkedValue(context, principal, field, link);
+                    if (value == null) continue;
+                    if (skipped < offset) {
+                        skipped++;
+                        continue;
+                    }
+                    visible.add(value);
+                    if (visible.size() == limit) break;
+                }
+                if (rows.size() < 100) break;
+                rawOffset = Math.addExact(rawOffset, rows.size());
+            }
+            if (field.many()) return List.copyOf(visible);
+            if (visible.size() > 1) throw new IllegalStateException("Relationship cardinality does not match the registered schema");
+            return visible.isEmpty() ? null : visible.getFirst();
+        });
     }
 
     private Object visibleLinkedValue(RequestContext context, SecurityPrincipal principal,
@@ -242,16 +271,18 @@ public final class ApplicationService {
 
     public Object readComputedField(RequestContext context, SecurityPrincipal principal, EntityKey source, String name, QueryOptions view) {
         requireContext(context, principal);
-        var field = computedFields.getOrDefault(source.type(), List.of()).stream().filter(value -> value.name().equals(name))
-                .findFirst().orElseThrow(() -> new IllegalArgumentException("Unknown computed field"));
-        if (!authorization.check(context, principal, "viewer", source) || !visibleComputedField(principal, source.type(), field)) return null;
-        if (view.asOfValidTime() != null) {
-            if (!TemporalHistory.active(storage.getObjectAtTime(context, source.type(), source.id(), view.asOfValidTime(), view.asOfRecordedTime()))) return null;
-        } else {
-            var object = storage.getObject(context, source.type(), source.id());
-            if (object == null || object.isDeleted()) return null;
-        }
-        return computedValue(context, principal, source, field, view);
+        return storage.read(context, () -> {
+            var field = computedFields.getOrDefault(source.type(), List.of()).stream().filter(value -> value.name().equals(name))
+                    .findFirst().orElseThrow(() -> new IllegalArgumentException("Unknown computed field"));
+            if (!authorization.check(context, principal, "viewer", source) || !visibleComputedField(principal, source.type(), field)) return null;
+            if (view.asOfValidTime() != null) {
+                if (!TemporalHistory.active(storage.getObjectAtTime(context, source.type(), source.id(), view.asOfValidTime(), view.asOfRecordedTime()))) return null;
+            } else {
+                var object = storage.getObject(context, source.type(), source.id());
+                if (object == null || object.isDeleted()) return null;
+            }
+            return computedValue(context, principal, source, field, view);
+        });
     }
 
     private Object computedValue(RequestContext context, SecurityPrincipal principal, EntityKey source,
@@ -301,6 +332,7 @@ public final class ApplicationService {
     public ActionResult execute(ActionManifest manifest, RequestContext context, SecurityPrincipal principal,
                                 Map<String, Object> parameters, String idempotencyKey) {
         requireContext(context, principal);
+        storage.requireCurrent(context);
         ActionManifest registered = manifests.get(manifest.action());
         if (registered == null || !registered.equals(manifest)) throw new SecurityException("Unregistered or altered Action manifest");
         ActionTypeDefinition definition = definitions.get(registered.action());
@@ -323,6 +355,7 @@ public final class ApplicationService {
 
     public ActionResult resume(RequestContext context, SecurityPrincipal principal, String actionName, String actionId) {
         requireContext(context, principal);
+        storage.requireCurrent(context);
         var manifest = manifests.get(actionName);
         var definition = definitions.get(actionName);
         if (manifest == null || definition == null) throw new SecurityException("Action continuation denied");

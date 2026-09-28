@@ -114,215 +114,261 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
     }
 
     @Override
-    public ObjectRecord getObject(RequestContext context, String type, String id) {
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement statement = connection.prepareStatement("""
-                     SELECT tenant_id, object_type, object_id, version, created_at, updated_at,
-                            deleted_at, last_transaction_id, last_action_id, properties_json
-                     FROM of_objects WHERE tenant_id = ? AND object_type = ? AND object_id = ?
-                     """)) {
-            statement.setString(1, context.tenantId());
-            statement.setString(2, type);
-            statement.setString(3, id);
-            try (ResultSet result = statement.executeQuery()) {
-                return result.next() ? readObject(result) : null;
-            }
-        } catch (SQLException exception) {
-            throw sqlError("read object", exception);
+    public org.openfoundry.foundation.spi.SchemaBinding schemaBinding() {
+        var current = binding;
+        return current == null ? null : new org.openfoundry.foundation.spi.SchemaBinding(current.id(), current.schema());
+    }
+
+    @Override
+    public void requireSchemaBinding(RequestContext context, org.openfoundry.foundation.spi.SchemaBinding expected) {
+        var current = binding;
+        if (expected == null || current == null || !current.id().equals(expected.id())) {
+            throw new org.openfoundry.foundation.spi.SchemaVersionMismatchException();
         }
+        try (var connection = dataSource.getConnection()) {
+            activation.requireBinding(connection, current, false);
+        } catch (SQLException failure) { throw sqlError("verify read schema binding", failure); }
+    }
+
+    private <T> T schemaRead(RequestContext context, java.util.function.Supplier<T> reader) {
+        var expected = schemaBinding();
+        requireSchemaBinding(context, expected);
+        try { return reader.get(); }
+        finally { requireSchemaBinding(context, expected); }
+    }
+
+    @Override
+    public ObjectRecord getObject(RequestContext context, String type, String id) {
+        return schemaRead(context, () -> {
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement statement = connection.prepareStatement("""
+                         SELECT tenant_id, object_type, object_id, version, created_at, updated_at,
+                                deleted_at, last_transaction_id, last_action_id, properties_json
+                         FROM of_objects WHERE tenant_id = ? AND object_type = ? AND object_id = ?
+                         """)) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, type);
+                statement.setString(3, id);
+                try (ResultSet result = statement.executeQuery()) {
+                    return result.next() ? readObject(result) : null;
+                }
+            } catch (SQLException exception) {
+                throw sqlError("read object", exception);
+            }
+        });
     }
 
     @Override
     public List<ObjectRecord> queryObjects(RequestContext context, String type, QueryOptions options) {
-        if (options.asOfValidTime() != null) {
-            try (Connection connection = dataSource.getConnection()) {
-                var history = readTemporalHistory(connection, context, false, type, null, options.asOfRecordedTime());
-                var rows = TemporalHistory.group(history).values().stream().map(versions -> {
-                    var snapshot = TemporalHistory.at(versions, options.asOfValidTime(), options.asOfRecordedTime());
-                    return snapshot == null ? null : TemporalHistory.object(context.tenantId(), snapshot, TemporalHistory.createdAt(versions));
-                }).filter(Objects::nonNull).filter(object -> options.includeDeleted() || !object.isDeleted())
-                        .sorted(java.util.Comparator.comparing(ObjectRecord::id)).toList();
-                return TemporalHistory.page(rows, options);
-            } catch (SQLException failure) { throw sqlError("temporal object list", failure); }
-        }
-        String deleted = options.includeDeleted() ? "" : " AND deleted_at IS NULL";
-        String sql = """
-                SELECT tenant_id, object_type, object_id, version, created_at, updated_at,
-                       deleted_at, last_transaction_id, last_action_id, properties_json
-                FROM of_objects WHERE tenant_id = ? AND object_type = ?
-                """ + deleted + " ORDER BY object_id" + dialect.paginationClause();
-        try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, context.tenantId());
-            statement.setString(2, type);
-            statement.setInt(3, options.limit());
-            statement.setInt(4, options.offset());
-            try (ResultSet result = statement.executeQuery()) {
-                List<ObjectRecord> objects = new ArrayList<>();
-                while (result.next()) objects.add(readObject(result));
-                return List.copyOf(objects);
+        return schemaRead(context, () -> {
+            if (options.asOfValidTime() != null) {
+                try (Connection connection = dataSource.getConnection()) {
+                    var history = readTemporalHistory(connection, context, false, type, null, options.asOfRecordedTime());
+                    var rows = TemporalHistory.group(history).values().stream().map(versions -> {
+                        var snapshot = TemporalHistory.at(versions, options.asOfValidTime(), options.asOfRecordedTime());
+                        return snapshot == null ? null : TemporalHistory.object(context.tenantId(), snapshot, TemporalHistory.createdAt(versions));
+                    }).filter(Objects::nonNull).filter(object -> options.includeDeleted() || !object.isDeleted())
+                            .sorted(java.util.Comparator.comparing(ObjectRecord::id)).toList();
+                    return TemporalHistory.page(rows, options);
+                } catch (SQLException failure) { throw sqlError("temporal object list", failure); }
             }
-        } catch (SQLException exception) {
-            throw sqlError("query objects", exception);
-        }
+            String deleted = options.includeDeleted() ? "" : " AND deleted_at IS NULL";
+            String sql = """
+                    SELECT tenant_id, object_type, object_id, version, created_at, updated_at,
+                           deleted_at, last_transaction_id, last_action_id, properties_json
+                    FROM of_objects WHERE tenant_id = ? AND object_type = ?
+                    """ + deleted + " ORDER BY object_id" + dialect.paginationClause();
+            try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, type);
+                statement.setInt(3, options.limit());
+                statement.setInt(4, options.offset());
+                try (ResultSet result = statement.executeQuery()) {
+                    List<ObjectRecord> objects = new ArrayList<>();
+                    while (result.next()) objects.add(readObject(result));
+                    return List.copyOf(objects);
+                }
+            } catch (SQLException exception) {
+                throw sqlError("query objects", exception);
+            }
+        });
     }
 
     @Override
     public HistorySnapshot getObjectAtVersion(RequestContext context, String type, String id, long version) {
-        return readHistory(context, false, type, id,
-                " AND version = ?", statement -> statement.setLong(4, version)).stream().findFirst().orElse(null);
+        return schemaRead(context, () -> {
+            return readHistory(context, false, type, id,
+                    " AND version = ?", statement -> statement.setLong(4, version)).stream().findFirst().orElse(null);
+        });
     }
 
     @Override
     public HistorySnapshot getObjectAtTime(RequestContext context, String type, String id,
                                            Instant validTime, Instant recordedTime) {
-        try (Connection connection = dataSource.getConnection()) {
-            return TemporalHistory.at(readTemporalHistory(connection, context, false, type, id, recordedTime), validTime, recordedTime);
-        } catch (SQLException failure) { throw sqlError("temporal object read", failure); }
+        return schemaRead(context, () -> {
+            try (Connection connection = dataSource.getConnection()) {
+                return TemporalHistory.at(readTemporalHistory(connection, context, false, type, id, recordedTime), validTime, recordedTime);
+            } catch (SQLException failure) { throw sqlError("temporal object read", failure); }
+        });
     }
 
     @Override
     public LinkRecord getLink(RequestContext context, String type, String id) {
-        try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement(linkSelect()
-                + " WHERE tenant_id = ? AND link_type = ? AND link_id = ?")) {
-            statement.setString(1, context.tenantId());
-            statement.setString(2, type);
-            statement.setString(3, id);
-            try (ResultSet result = statement.executeQuery()) {
-                return result.next() ? readLink(result) : null;
+        return schemaRead(context, () -> {
+            try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement(linkSelect()
+                    + " WHERE tenant_id = ? AND link_type = ? AND link_id = ?")) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, type);
+                statement.setString(3, id);
+                try (ResultSet result = statement.executeQuery()) {
+                    return result.next() ? readLink(result) : null;
+                }
+            } catch (SQLException exception) {
+                throw sqlError("read link", exception);
             }
-        } catch (SQLException exception) {
-            throw sqlError("read link", exception);
-        }
+        });
     }
 
     @Override
     public List<LinkRecord> getLinks(RequestContext context, EntityKey endpoint, String linkType,
                                      Direction direction, QueryOptions options) {
-        if (options.asOfValidTime() != null) {
-            try (Connection connection = dataSource.getConnection()) {
-                var history = readTemporalHistory(connection, context, true, linkType, null, options.asOfRecordedTime());
-                var rows = TemporalHistory.group(history).values().stream().map(versions -> {
-                    var snapshot = TemporalHistory.at(versions, options.asOfValidTime(), options.asOfRecordedTime());
-                    return snapshot == null ? null : TemporalHistory.link(context.tenantId(), snapshot, versions, options.asOfRecordedTime());
-                }).filter(Objects::nonNull)
-                        .filter(link -> direction == Direction.OUTBOUND ? link.from().equals(endpoint) : link.to().equals(endpoint))
-                        .filter(link -> options.includeDeleted() || !link.isDeleted())
-                        .sorted(java.util.Comparator.comparing(LinkRecord::id)).toList();
-                return TemporalHistory.page(rows, options);
-            } catch (SQLException failure) { throw sqlError("temporal link list", failure); }
-        }
-        String endpointType = direction == Direction.OUTBOUND ? "from_type" : "to_type";
-        String endpointId = direction == Direction.OUTBOUND ? "from_id" : "to_id";
-        String deleted = options.includeDeleted() ? "" : " AND deleted_at IS NULL";
-        String sql = linkSelect() + " WHERE tenant_id = ? AND link_type = ? AND " + endpointType
-                + " = ? AND " + endpointId + " = ?" + deleted
-                + " ORDER BY link_id" + dialect.paginationClause();
-        try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, context.tenantId());
-            statement.setString(2, linkType);
-            statement.setString(3, endpoint.type());
-            statement.setString(4, endpoint.id());
-            statement.setInt(5, options.limit());
-            statement.setInt(6, options.offset());
-            try (ResultSet result = statement.executeQuery()) {
-                List<LinkRecord> links = new ArrayList<>();
-                while (result.next()) links.add(readLink(result));
-                return List.copyOf(links);
+        return schemaRead(context, () -> {
+            if (options.asOfValidTime() != null) {
+                try (Connection connection = dataSource.getConnection()) {
+                    var history = readTemporalHistory(connection, context, true, linkType, null, options.asOfRecordedTime());
+                    var rows = TemporalHistory.group(history).values().stream().map(versions -> {
+                        var snapshot = TemporalHistory.at(versions, options.asOfValidTime(), options.asOfRecordedTime());
+                        return snapshot == null ? null : TemporalHistory.link(context.tenantId(), snapshot, versions, options.asOfRecordedTime());
+                    }).filter(Objects::nonNull)
+                            .filter(link -> direction == Direction.OUTBOUND ? link.from().equals(endpoint) : link.to().equals(endpoint))
+                            .filter(link -> options.includeDeleted() || !link.isDeleted())
+                            .sorted(java.util.Comparator.comparing(LinkRecord::id)).toList();
+                    return TemporalHistory.page(rows, options);
+                } catch (SQLException failure) { throw sqlError("temporal link list", failure); }
             }
-        } catch (SQLException exception) {
-            throw sqlError("query links", exception);
-        }
+            String endpointType = direction == Direction.OUTBOUND ? "from_type" : "to_type";
+            String endpointId = direction == Direction.OUTBOUND ? "from_id" : "to_id";
+            String deleted = options.includeDeleted() ? "" : " AND deleted_at IS NULL";
+            String sql = linkSelect() + " WHERE tenant_id = ? AND link_type = ? AND " + endpointType
+                    + " = ? AND " + endpointId + " = ?" + deleted
+                    + " ORDER BY link_id" + dialect.paginationClause();
+            try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, linkType);
+                statement.setString(3, endpoint.type());
+                statement.setString(4, endpoint.id());
+                statement.setInt(5, options.limit());
+                statement.setInt(6, options.offset());
+                try (ResultSet result = statement.executeQuery()) {
+                    List<LinkRecord> links = new ArrayList<>();
+                    while (result.next()) links.add(readLink(result));
+                    return List.copyOf(links);
+                }
+            } catch (SQLException exception) {
+                throw sqlError("query links", exception);
+            }
+        });
     }
 
     @Override
     public HistorySnapshot getLinkAtVersion(RequestContext context, String type, String id, long version) {
-        return readHistory(context, true, type, id,
-                " AND version = ?", statement -> statement.setLong(4, version)).stream().findFirst().orElse(null);
+        return schemaRead(context, () -> {
+            return readHistory(context, true, type, id,
+                    " AND version = ?", statement -> statement.setLong(4, version)).stream().findFirst().orElse(null);
+        });
     }
 
     @Override
     public HistorySnapshot getLinkAtTime(RequestContext context, String type, String id,
                                          Instant validTime, Instant recordedTime) {
-        try (Connection connection = dataSource.getConnection()) {
-            return TemporalHistory.at(readTemporalHistory(connection, context, true, type, id, recordedTime), validTime, recordedTime);
-        } catch (SQLException failure) { throw sqlError("temporal link read", failure); }
+        return schemaRead(context, () -> {
+            try (Connection connection = dataSource.getConnection()) {
+                return TemporalHistory.at(readTemporalHistory(connection, context, true, type, id, recordedTime), validTime, recordedTime);
+            } catch (SQLException failure) { throw sqlError("temporal link read", failure); }
+        });
     }
 
     @Override
     public TraversalResult traverseAsOf(RequestContext context, EntityKey start,
                                         List<TraversalStep> path, Instant validTime,
                                         Instant recordedTime, QueryOptions options) {
-        if (path.size() > 10) throw new IllegalArgumentException("traversal depth exceeds 10");
-        try (Connection connection = dataSource.getConnection()) {
-            connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
-            connection.setReadOnly(true);
-            connection.setAutoCommit(false);
-            try {
-                var objectTypes = new java.util.HashSet<String>();
-                objectTypes.add(start.type());
-                var linkTypes = new java.util.HashSet<String>();
-                for (var step : path) {
-                    var definition = requireLinkType(step.linkType());
-                    linkTypes.add(definition.name());
-                    objectTypes.add(definition.fromType());
-                    objectTypes.add(definition.toType());
+        return schemaRead(context, () -> {
+            if (path.size() > 10) throw new IllegalArgumentException("traversal depth exceeds 10");
+            try (Connection connection = dataSource.getConnection()) {
+                connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+                connection.setReadOnly(true);
+                connection.setAutoCommit(false);
+                try {
+                    var objectTypes = new java.util.HashSet<String>();
+                    objectTypes.add(start.type());
+                    var linkTypes = new java.util.HashSet<String>();
+                    for (var step : path) {
+                        var definition = requireLinkType(step.linkType());
+                        linkTypes.add(definition.name());
+                        objectTypes.add(definition.fromType());
+                        objectTypes.add(definition.toType());
+                    }
+                    var objects = new ArrayList<HistorySnapshot>();
+                    var links = new ArrayList<HistorySnapshot>();
+                    for (String type : objectTypes) objects.addAll(readTemporalHistory(connection, context, false, type, null, recordedTime));
+                    for (String type : linkTypes) links.addAll(readTemporalHistory(connection, context, true, type, null, recordedTime));
+                    var result = TemporalHistory.traverse(objects, links, start, path, validTime, recordedTime, options);
+                    connection.commit();
+                    return result;
+                } catch (RuntimeException | SQLException failure) {
+                    connection.rollback();
+                    throw failure;
                 }
-                var objects = new ArrayList<HistorySnapshot>();
-                var links = new ArrayList<HistorySnapshot>();
-                for (String type : objectTypes) objects.addAll(readTemporalHistory(connection, context, false, type, null, recordedTime));
-                for (String type : linkTypes) links.addAll(readTemporalHistory(connection, context, true, type, null, recordedTime));
-                var result = TemporalHistory.traverse(objects, links, start, path, validTime, recordedTime, options);
-                connection.commit();
-                return result;
-            } catch (RuntimeException | SQLException failure) {
-                connection.rollback();
-                throw failure;
-            }
-        } catch (SQLException failure) { throw sqlError("temporal traversal", failure); }
+            } catch (SQLException failure) { throw sqlError("temporal traversal", failure); }
+        });
     }
 
     @Override
     public List<HistorySnapshot> getEntityHistory(RequestContext context, EntityKey key) {
-        var current = binding;
-        boolean link = current != null && current.schema().linkTypes().stream().anyMatch(type -> type.name().equals(key.type()));
-        String table = link ? "of_link_history" : "of_object_history";
-        String typeColumn = link ? "link_type" : "object_type";
-        String idColumn = link ? "link_id" : "object_id";
-        String sql = "SELECT * FROM " + table + " WHERE tenant_id = ? AND " + typeColumn
-                + " = ? AND " + idColumn + " = ? ORDER BY version";
-        try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
-            statement.setString(1, context.tenantId());
-            statement.setString(2, key.type());
-            statement.setString(3, key.id());
-            try (ResultSet result = statement.executeQuery()) {
-                List<HistorySnapshot> snapshots = new ArrayList<>();
-                while (result.next()) snapshots.add(readHistory(result, link));
-                return List.copyOf(snapshots);
+        return schemaRead(context, () -> {
+            var current = binding;
+            boolean link = current != null && current.schema().linkTypes().stream().anyMatch(type -> type.name().equals(key.type()));
+            String table = link ? "of_link_history" : "of_object_history";
+            String typeColumn = link ? "link_type" : "object_type";
+            String idColumn = link ? "link_id" : "object_id";
+            String sql = "SELECT * FROM " + table + " WHERE tenant_id = ? AND " + typeColumn
+                    + " = ? AND " + idColumn + " = ? ORDER BY version";
+            try (Connection connection = dataSource.getConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, key.type());
+                statement.setString(3, key.id());
+                try (ResultSet result = statement.executeQuery()) {
+                    List<HistorySnapshot> snapshots = new ArrayList<>();
+                    while (result.next()) snapshots.add(readHistory(result, link));
+                    return List.copyOf(snapshots);
+                }
+            } catch (SQLException exception) {
+                throw sqlError("read entity history", exception);
             }
-        } catch (SQLException exception) {
-            throw sqlError("read entity history", exception);
-        }
+        });
     }
 
     @Override
     public List<org.openfoundry.foundation.spi.ActionExecution> pendingActions(RequestContext context, Instant now, int limit) {
-        if (limit < 1 || limit > 10000) throw new IllegalArgumentException("Invalid continuation limit");
-        String sql = "SELECT * FROM of_action_executions WHERE tenant_id = ? AND actor_id = ? AND available_at <= ?"
-                + " ORDER BY available_at, execution_id" + dialect.paginationClause();
-        try (var connection = dataSource.getConnection(); var statement = connection.prepareStatement(sql)) {
-            statement.setString(1, context.tenantId());
-            statement.setString(2, context.actorId());
-            statement.setTimestamp(3, timestamp(now));
-            statement.setInt(4, limit);
-            statement.setInt(5, 0);
-            try (var rows = statement.executeQuery()) {
-                var result = new ArrayList<org.openfoundry.foundation.spi.ActionExecution>();
-                while (rows.next()) result.add(readActionExecution(rows));
-                return List.copyOf(result);
+        return schemaRead(context, () -> {
+            if (limit < 1 || limit > 10000) throw new IllegalArgumentException("Invalid continuation limit");
+            String sql = "SELECT * FROM of_action_executions WHERE tenant_id = ? AND actor_id = ? AND available_at <= ?"
+                    + " ORDER BY available_at, execution_id" + dialect.paginationClause();
+            try (var connection = dataSource.getConnection(); var statement = connection.prepareStatement(sql)) {
+                statement.setString(1, context.tenantId());
+                statement.setString(2, context.actorId());
+                statement.setTimestamp(3, timestamp(now));
+                statement.setInt(4, limit);
+                statement.setInt(5, 0);
+                try (var rows = statement.executeQuery()) {
+                    var result = new ArrayList<org.openfoundry.foundation.spi.ActionExecution>();
+                    while (rows.next()) result.add(readActionExecution(rows));
+                    return List.copyOf(result);
+                }
+            } catch (SQLException failure) {
+                throw sqlError("list action continuations", failure);
             }
-        } catch (SQLException failure) {
-            throw sqlError("list action continuations", failure);
-        }
+        });
     }
 
     private org.openfoundry.foundation.spi.ActionExecution readActionExecution(ResultSet row) throws SQLException {
@@ -345,6 +391,29 @@ public final class JdbcStorageProvider implements StorageProvider, AutoCloseable
             return new JdbcTransaction(context, connection, current);
         } catch (SQLException exception) {
             throw sqlError("begin transaction", exception);
+        }
+    }
+
+    @Override
+    public Transaction beginTransaction(RequestContext context, org.openfoundry.foundation.spi.SchemaBinding expected) {
+        var current = binding;
+        if (expected == null || current == null || !current.id().equals(expected.id())) {
+            throw new org.openfoundry.foundation.spi.SchemaVersionMismatchException();
+        }
+        initializeWriteGuard(context);
+        Connection connection = null;
+        try {
+            connection = dataSource.getConnection();
+            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+            connection.setAutoCommit(false);
+            activation.requireBinding(connection, current, false);
+            return new JdbcTransaction(context, connection, current);
+        } catch (SQLException | RuntimeException failure) {
+            if (connection != null) {
+                try { connection.close(); } catch (SQLException close) { failure.addSuppressed(close); }
+            }
+            if (failure instanceof SQLException sql) throw sqlError("begin bound transaction", sql);
+            throw (RuntimeException) failure;
         }
     }
 

@@ -28,6 +28,10 @@ public final class SchemaFingerprint {
         } catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
     }
 
+    static boolean equivalent(Object left, Object right) {
+        return PropertyValues.canonical(value(left)).equals(PropertyValues.canonical(value(right)));
+    }
+
     private static Object value(Object raw) {
         if (raw == null || raw instanceof String || raw instanceof Boolean || raw instanceof Number) return raw;
         if (raw instanceof Enum<?> enumeration) return enumeration.name();

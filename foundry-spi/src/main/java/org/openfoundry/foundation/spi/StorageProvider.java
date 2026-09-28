@@ -39,6 +39,21 @@ public interface StorageProvider {
 
     Transaction beginTransaction(RequestContext context);
 
+    /** Local immutable binding, or null before schema initialization. */
+    default SchemaBinding schemaBinding() {
+        throw new UnsupportedOperationException("Schema binding is not supported");
+    }
+
+    /** Check the supplied activation against both this instance and authoritative shared state. */
+    default void requireSchemaBinding(RequestContext context, SchemaBinding expected) {
+        throw new UnsupportedOperationException("Schema binding is not supported");
+    }
+
+    /** Begin a transaction using exactly this binding; implementations must not silently rebind it. */
+    default Transaction beginTransaction(RequestContext context, SchemaBinding expected) {
+        throw new UnsupportedOperationException("Bound transactions are not supported");
+    }
+
     default List<ActionExecution> pendingActions(RequestContext context, Instant now, int limit) {
         throw new UnsupportedOperationException("Durable action continuations are not supported");
     }

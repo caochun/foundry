@@ -55,6 +55,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
     }
 
     private OntologySchema schema;
+    private volatile String schemaId;
     private State state = new State();
     private long revision;
 
@@ -63,8 +64,35 @@ public final class InMemoryStorageProvider implements StorageProvider {
         Objects.requireNonNull(context, "context must not be null");
         propertyValidator.validateSchema(schema);
         synchronized (monitor) {
-            if (!Objects.equals(this.schema, schema)) revision++;
+            if (!Objects.equals(this.schema, schema)) {
+                revision++;
+                schemaId = java.util.UUID.randomUUID().toString();
+            }
             this.schema = Objects.requireNonNull(schema, "schema must not be null");
+        }
+    }
+
+    @Override
+    public org.openfoundry.foundation.spi.SchemaBinding schemaBinding() {
+        synchronized (monitor) {
+            return schema == null ? null : new org.openfoundry.foundation.spi.SchemaBinding(schemaId, schema);
+        }
+    }
+
+    @Override
+    public void requireSchemaBinding(RequestContext context, org.openfoundry.foundation.spi.SchemaBinding expected) {
+        synchronized (monitor) {
+            if (expected == null || schemaId == null || !schemaId.equals(expected.id())) {
+                throw new org.openfoundry.foundation.spi.SchemaVersionMismatchException();
+            }
+        }
+    }
+
+    @Override
+    public Transaction beginTransaction(RequestContext context, org.openfoundry.foundation.spi.SchemaBinding expected) {
+        synchronized (monitor) {
+            requireSchemaBinding(context, expected);
+            return beginTransaction(context);
         }
     }
 
@@ -255,32 +283,6 @@ public final class InMemoryStorageProvider implements StorageProvider {
                 String.valueOf(snapshot.state().get("_toId")));
     }
 
-    private void requireObjectType(String type) {
-        if (schema == null || schema.objectTypes().stream().noneMatch(candidate -> candidate.name().equals(type))) {
-            throw new IllegalArgumentException("unknown object type: " + type);
-        }
-    }
-
-    private List<org.openfoundry.foundation.spi.schema.PropertyDefinition> objectProperties(String type) {
-        requireObjectType(type);
-        return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().properties();
-    }
-
-    private List<String> objectConstraints(String type) {
-        requireObjectType(type);
-        return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().constraints();
-    }
-
-    private LinkTypeDefinition requireLinkType(String type) {
-        if (schema == null) {
-            throw new IllegalStateException("schema has not been applied");
-        }
-        return schema.linkTypes().stream()
-                .filter(candidate -> candidate.name().equals(type))
-                .findFirst()
-                .orElseThrow(() -> new IllegalArgumentException("unknown link type: " + type));
-    }
-
     private final class MemoryTransaction implements Transaction {
         private final RequestContext context;
         private final long baseRevision;
@@ -288,12 +290,39 @@ public final class InMemoryStorageProvider implements StorageProvider {
         private final String transactionId = UUID.randomUUID().toString();
         private boolean closed;
         private final UniquePropertyIndex uniqueProperties = new UniquePropertyIndex();
-        private final OntologySchema transactionSchema = schema;
+        private final OntologySchema schema = InMemoryStorageProvider.this.schema;
+        private final String transactionSchemaId = schemaId;
 
         private MemoryTransaction(RequestContext context, long baseRevision, State working) {
             this.context = context;
             this.baseRevision = baseRevision;
             this.working = working;
+        }
+
+        private void requireObjectType(String type) {
+            if (schema == null || schema.objectTypes().stream().noneMatch(candidate -> candidate.name().equals(type))) {
+                throw new IllegalArgumentException("unknown object type: " + type);
+            }
+        }
+
+        private List<org.openfoundry.foundation.spi.schema.PropertyDefinition> objectProperties(String type) {
+            requireObjectType(type);
+            return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().properties();
+        }
+
+        private List<String> objectConstraints(String type) {
+            requireObjectType(type);
+            return schema.objectTypes().stream().filter(candidate -> candidate.name().equals(type)).findFirst().orElseThrow().constraints();
+        }
+
+        private LinkTypeDefinition requireLinkType(String type) {
+            if (schema == null) {
+                throw new IllegalStateException("schema has not been applied");
+            }
+            return schema.linkTypes().stream()
+                    .filter(candidate -> candidate.name().equals(type))
+                    .findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException("unknown link type: " + type));
         }
 
         @Override
@@ -605,6 +634,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
         public void commit() {
             assertOpen();
             synchronized (monitor) {
+                assertOpen();
                 if (revision != baseRevision) {
                     throw new org.openfoundry.foundation.spi.TransactionConflictException("transaction conflict: storage changed during transaction");
                 }
@@ -704,7 +734,7 @@ public final class InMemoryStorageProvider implements StorageProvider {
         }
 
         private void assertOpen() {
-            if (!Objects.equals(transactionSchema, schema)) throw new IllegalStateException("Schema changed during transaction");
+            if (!Objects.equals(transactionSchemaId, schemaId)) throw new org.openfoundry.foundation.spi.SchemaVersionMismatchException();
             if (closed) {
                 throw new IllegalStateException("transaction is closed");
             }

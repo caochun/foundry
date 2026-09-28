@@ -296,7 +296,11 @@ public final class PropertyValues {
 
     public static Object immutableValue(Object raw) {
         if (raw == null || raw instanceof String || raw instanceof Boolean) return raw;
-        if (raw instanceof Number number && Double.isFinite(number.doubleValue())) return raw;
+        if (raw instanceof Number number && Double.isFinite(number.doubleValue())) {
+            if (raw instanceof Byte || raw instanceof Short || raw instanceof Integer || raw instanceof Long
+                    || raw instanceof Float || raw instanceof Double || raw.getClass() == java.math.BigInteger.class || raw.getClass() == BigDecimal.class) return raw;
+            throw new IllegalArgumentException("Mutable or custom numeric JSON values are not supported");
+        }
         if (raw instanceof Map<?, ?> map) {
             var result = new LinkedHashMap<String, Object>();
             map.forEach((key, value) -> {

@@ -32,7 +32,7 @@ class SchemaRegistryPersistenceTest {
             interface Identifiable { id: ID! @primary }
             type Node implements Identifiable @objectType {
                 title: String! state: State @default(value: "READY")
-                data: JSON @default(value: {enabled:true, numbers:[1,2]})
+                data: JSON @default(value: {enabled:true, numbers:[1,2], fraction:0.12345678901234567890123456789})
                 createdAt: DateTime @readonly
                 targets: [Node!] @link(type: "Edge", direction: OUTBOUND)
                 count: Int @computed(fn: "countLinks", args: {type:"Edge"})
@@ -234,6 +234,27 @@ class SchemaRegistryPersistenceTest {
             assertThrows(IllegalStateException.class, registry::current, mutation);
             assertThrows(IllegalStateException.class, () -> registry.apply(BASE, new MigrationPlan("must not repair corrupt history", true)), mutation);
         }
+    }
+
+    @Test
+    void exactDecimalDefaultsSurviveRestartWithoutFingerprintDrift() {
+        var exact = new java.math.BigDecimal("0.12345678901234567890123456789");
+        var objects = BASE.objectTypes().stream().map(type -> {
+            if (!type.name().equals("Node")) return type;
+            var fields = type.properties().stream().map(field -> {
+                if (!field.name().equals("data")) return field;
+                return new org.openfoundry.foundation.spi.schema.PropertyDefinition(field.name(), field.type(), field.required(), field.primary(),
+                        field.unique(), field.indexed(), field.sensitive(), field.immutable(), field.readOnly(), true, Map.of("fraction", exact), field.constraints());
+            }).toList();
+            return new org.openfoundry.foundation.spi.schema.ObjectTypeDefinition(type.name(), fields, type.interfaces(), type.constraints(), type.linkFields(), type.computedFields());
+        }).toList();
+        var schema = new OntologySchema(BASE.namespace(), BASE.version(), objects, BASE.linkTypes(), BASE.actionTypes(), BASE.enums(), BASE.interfaces());
+        var data = data("jdbc:h2:mem:exact_registry_" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
+        new JdbcSchemaRegistry(data, DatabaseDialect.h2()).apply(schema, null);
+        var restarted = new JdbcSchemaRegistry(data, DatabaseDialect.h2());
+        assertEquals(schema, restarted.current());
+        assertEquals(SchemaFingerprint.of(schema), SchemaFingerprint.of(restarted.current()));
+        assertEquals(1, restarted.applyIfChanged(schema, null).version());
     }
 
     private static OntologySchema reordered(OntologySchema schema) {

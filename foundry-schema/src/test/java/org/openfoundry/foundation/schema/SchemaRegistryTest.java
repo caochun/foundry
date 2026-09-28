@@ -62,6 +62,20 @@ class SchemaRegistryTest {
         org.junit.jupiter.api.Assertions.assertNotEquals(new SchemaCompiler().compile(before).schemaDigest(), new SchemaCompiler().compile(narrowed).schemaDigest());
     }
 
+    @Test
+    void equivalentNumericDefaultRepresentationsDoNotCreateFalseMigrationChanges() {
+        var decimal = new PropertyDefinition("data", "JSON", false, false, false, false, false, false, false, true,
+                java.util.Map.of("fraction", new java.math.BigDecimal("0.1")), List.of());
+        var floating = new PropertyDefinition("data", "JSON", false, false, false, false, false, false, false, true,
+                java.util.Map.of("fraction", 0.1d), List.of());
+        var before = schema(List.of(ID, decimal));
+        var same = schema(List.of(ID, floating));
+        assertEquals(SchemaFingerprint.of(before), SchemaFingerprint.of(same));
+        org.junit.jupiter.api.Assertions.assertTrue(new SchemaDiffer().diff(before, same).isEmpty());
+        var added = schema(List.of(ID, floating, new PropertyDefinition("optional", "String", false, false, false, false, false, false)));
+        assertEquals(MigrationClass.SAFE, new SchemaDiffer().diff(before, added).classification());
+    }
+
     private static OntologySchema schema(List<PropertyDefinition> properties) {
         return new OntologySchema("example", "0.1.0", List.of(new ObjectTypeDefinition("Person", properties)), List.of(), List.of());
     }
