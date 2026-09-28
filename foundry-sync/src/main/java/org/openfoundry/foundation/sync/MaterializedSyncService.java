@@ -17,16 +17,18 @@ public final class MaterializedSyncService {
     private final UnknownOrigins unknownOrigins;
     private final Clock clock;
     private final TransformRegistry transforms;
+    private final Map<String, Object> sourceConfiguration;
 
     public MaterializedSyncService(StorageProvider storage) {
         this(storage, new ConflictResolver(ConflictResolver.Strategy.LAST_WRITE_WINS, Map.of(), Map.of()));
     }
 
     public MaterializedSyncService(StorageProvider storage, ConflictResolver conflicts) {
-        this(storage, conflicts, SyncAuthorizer.denyAll(), UnknownOrigins.REJECT_CHANGES, Clock.systemUTC(), new TransformRegistry());
+        this(storage, conflicts, SyncAuthorizer.denyAll(), UnknownOrigins.REJECT_CHANGES, Clock.systemUTC(), new TransformRegistry(), Map.of());
     }
 
-    private MaterializedSyncService(StorageProvider storage, ConflictResolver conflicts, SyncAuthorizer authorizer, UnknownOrigins unknownOrigins, Clock clock, TransformRegistry transforms) {
+    private MaterializedSyncService(StorageProvider storage, ConflictResolver conflicts, SyncAuthorizer authorizer, UnknownOrigins unknownOrigins, Clock clock, TransformRegistry transforms, Map<String, Object> sourceConfiguration) {
+        this.sourceConfiguration = PropertyValues.immutableMap(sourceConfiguration);
         this.transforms = Objects.requireNonNull(transforms);
         this.storage = Objects.requireNonNull(storage);
         this.conflicts = Objects.requireNonNull(conflicts);
@@ -35,11 +37,16 @@ public final class MaterializedSyncService {
         this.clock = Objects.requireNonNull(clock);
     }
 
-    public MaterializedSyncService withAuthorization(SyncAuthorizer policy) { return new MaterializedSyncService(storage, conflicts, policy, unknownOrigins, clock, transforms); }
-    public MaterializedSyncService withUnknownOrigins(UnknownOrigins policy) { return new MaterializedSyncService(storage, conflicts, authorizer, policy, clock, transforms); }
-    public MaterializedSyncService withClock(Clock clock) { return new MaterializedSyncService(storage, conflicts, authorizer, unknownOrigins, clock, transforms); }
+    public MaterializedSyncService withAuthorization(SyncAuthorizer policy) { return new MaterializedSyncService(storage, conflicts, policy, unknownOrigins, clock, transforms, sourceConfiguration); }
+    public MaterializedSyncService withUnknownOrigins(UnknownOrigins policy) { return new MaterializedSyncService(storage, conflicts, authorizer, policy, clock, transforms, sourceConfiguration); }
+    public MaterializedSyncService withClock(Clock clock) { return new MaterializedSyncService(storage, conflicts, authorizer, unknownOrigins, clock, transforms, sourceConfiguration); }
 
-    public MaterializedSyncService withTransforms(TransformRegistry registry) { return new MaterializedSyncService(storage, conflicts, authorizer, unknownOrigins, clock, registry); }
+    public MaterializedSyncService withTransforms(TransformRegistry registry) { return new MaterializedSyncService(storage, conflicts, authorizer, unknownOrigins, clock, registry, sourceConfiguration); }
+
+    /** Bind a managed source plan without changing the identity of legacy, unbound ingestion configurations. */
+    public MaterializedSyncService withSourceConfiguration(Map<String, Object> configuration) {
+        return new MaterializedSyncService(storage, conflicts, authorizer, unknownOrigins, clock, transforms, configuration);
+    }
 
     public IngestionCheckpoint checkpoint(String connector, MappingConfig mapping, String partition, RequestContext context) {
         requirePipeline(context, connector, mapping);
@@ -326,7 +333,8 @@ public final class MaterializedSyncService {
     }
 
     private String configuration(String mappingVersion) {
-        return LineageValues.hash(true, Map.of("format", "materialized-sync-v1", "mapping", mappingVersion, "conflicts", conflicts.configuration(), "unknownOrigins", unknownOrigins.name()));
+        String legacy = LineageValues.hash(true, Map.of("format", "materialized-sync-v1", "mapping", mappingVersion, "conflicts", conflicts.configuration(), "unknownOrigins", unknownOrigins.name()));
+        return sourceConfiguration.isEmpty() ? legacy : LineageValues.hash(true, List.of("managed-source-v1", legacy, sourceConfiguration));
     }
 
     private static String checkpointKey(String connector, MappingConfig mapping, String partition) {
